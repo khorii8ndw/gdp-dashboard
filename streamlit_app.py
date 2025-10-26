@@ -12,11 +12,11 @@ st.set_page_config(layout="wide")
 RECORDS_PER_PAGE = 10 # ページごとの表示件数
 STATUS_OPTIONS = {'レビュー待ち': 'PENDING', '承認': 'APPROVE', '差し戻し': 'REJECT'}
 
-# === データの初期化/モックデータの準備 (変更なし) ===
+# === データの初期化/モックデータの準備 (修正箇所あり) ===
 @st.cache_data(show_spinner=False)
 def load_all_mock_data():
     """データロードロジックは変更なし"""
-    # データを増やすために101〜125番まで追加
+    # データを増やすために1〜25番まで追加
     data_production = {
         'id': list(range(1, 26)),
         'product_name': [f"Item {i:03d}" for i in range(1, 26)],
@@ -31,20 +31,27 @@ def load_all_mock_data():
     df_prod = pd.DataFrame(data_production)
 
     # 変更候補データを20件作成 (ID 1, 5, 10, 15, 20の変更と、ID 101-115の新規)
-    changed_ids = [1, 5, 10, 15, 20]
-    new_ids = list(range(101, 116))
+    changed_ids = [1, 5, 10, 15, 20] # 5件
+    new_ids = list(range(101, 116))   # 15件
     
+    # ----------------------------------------------------
+    # 【修正箇所: データ生成】
+    # ----------------------------------------------------
     data_candidate = {
-        'id': changed_ids + new_ids,
-        'product_name': [df_prod[df_prod['id']==i]['product_name'].iloc[0] + ' (UPDATED)' for i in changed_ids] + [f"New Item {i}" for i in new_ids], 
-        'price': [150.0, 550.0, 110.0, 75.0, 1050.0] + [50.0 + i for i in new_ids],
-        'vendor_id': ['V001', 'V005', 'V010', 'V015', 'V020'] + [f'V{i:03d}' for i in new_ids], 
-        'region': ['Fukuoka', 'Osaka', 'Tokyo', 'Sendai', 'Sapporo'] + ['Hokkaido'] * 15,                               
-        'status': ['ACTIVE', 'DEPRECATED'] * 2 + ['ACTIVE'] * 11 + ['DEPRECATED'],
-        'tax_code': ['A-10', 'C-30', 'A-10', 'B-20', 'C-30'] + ['A-10'] * 15,
-        'created_date': [datetime(2023, 1, 1)] * 5 + [datetime.now()] * 15,
-        'requires_review': [True] * 20
+        'id': changed_ids + new_ids, # 20件
+        'product_name': [df_prod[df_prod['id']==i]['product_name'].iloc[0] + ' (UPDATED)' for i in changed_ids] + [f"New Item {i}" for i in new_ids], # 20件
+        'price': [150.0, 550.0, 110.0, 75.0, 1050.0] + [50.0 + i for i in new_ids], # 20件
+        'vendor_id': ['V001', 'V005', 'V010', 'V015', 'V020'] + [f'V{i:03d}' for i in new_ids], # 20件
+        'region': ['Fukuoka', 'Osaka', 'Tokyo', 'Sendai', 'Sapporo'] + ['Hokkaido'] * 15, # 20件
+        
+        # 修正: リスト要素が20個になるように調整
+        'status': ['ACTIVE', 'DEPRECATED', 'ACTIVE', 'DEPRECATED', 'ACTIVE'] + ['ACTIVE'] * 14 + ['DEPRECATED'], # 5件 + 14件 + 1件 = 20件
+        
+        'tax_code': ['A-10', 'C-30', 'A-10', 'B-20', 'C-30'] + ['A-10'] * 15, # 20件
+        'created_date': [datetime(2023, 1, 1)] * 5 + [datetime.now()] * 15, # 20件
+        'requires_review': [True] * 20 # 20件
     }
+    # ----------------------------------------------------
     df_cand = pd.DataFrame(data_candidate)
     
     review_cols = [col for col in df_cand.columns if col not in ['id', 'requires_review']]
@@ -72,7 +79,6 @@ def load_all_mock_data():
 
 # === 補助関数 1：変更サマリーの自動生成 (変更なし) ===
 def create_vertical_summary(df_row: pd.Series):
-    # ... (前回のロジックと同一) ...
     is_new_record = pd.isna(df_row.get('product_name_prod', np.nan)) 
     
     if is_new_record:
@@ -99,7 +105,6 @@ def create_vertical_summary(df_row: pd.Series):
 
 # === 補助関数 2：縦型比較データの作成 (変更なし) ===
 def create_vertical_diff(df_row: pd.Series):
-    # ... (前回のロジックと同一) ...
     data = []
     all_cols = set(df_row.index) 
     
@@ -136,25 +141,24 @@ def create_vertical_diff(df_row: pd.Series):
     else:
         return diff_df.style.apply(style_diff, axis=1) 
 
-# === 承認ロジックの模擬 (ページ単位で実行) ===
+# === 承認ロジックの模擬 (ページ単位で実行) (変更なし) ===
 def execute_page_action(df_page: pd.DataFrame, submitted_data: dict, available_ids: list, current_page: int, total_pages: int):
     
-    # 処理されたIDを格納するリスト
     processed_ids = []
     
     for index, row in df_page.iterrows():
         record_id = row['id']
-        # フォームからのキーは 'action_ID' の形式
         action_key = f'action_{record_id}'
         
         # submitted_dataからアクションを取得 (デフォルトはPENDING)
-        action = submitted_data.get(action_key, STATUS_OPTIONS['レビュー待ち'])
+        action_label = submitted_data.get(action_key)
+        
+        # ラジオボタンで選択されたラベルからコードを取得
+        action = next((code for label, code in STATUS_OPTIONS.items() if label == action_label), STATUS_OPTIONS['レビュー待ち'])
 
         if action != STATUS_OPTIONS['レビュー待ち']:
-            # PENDING以外（APPROVEまたはREJECT）が選択されていれば処理
             
             # 1. マスターデータのレビュー状態を更新
-            # df_mergedを直接書き換えることで、レビュー済みとしてマークする
             st.session_state['df_merged'].loc[
                 st.session_state['df_merged']['id'] == record_id, 
                 'review_status'
@@ -162,12 +166,8 @@ def execute_page_action(df_page: pd.DataFrame, submitted_data: dict, available_i
             
             processed_ids.append(record_id)
             
-            # 処理ログ (オプション)
-            # st.write(f"ID {record_id}: {action} されました。")
-
-
     if processed_ids:
-        st.success(f"✅ このページで合計 {len(processed_ids)} 件のアクションが実行され、状態が更新されました。")
+        st.success(f"✅ このページで合計 **{len(processed_ids)} 件** のアクションが実行され、状態が更新されました。")
     else:
         st.warning("このページで承認または差し戻しのアクションは実行されませんでした。")
         
@@ -181,17 +181,18 @@ def execute_page_action(df_page: pd.DataFrame, submitted_data: dict, available_i
     st.rerun()
 
 
-# === アプリケーションの UI メイン関数 ===
+# === アプリケーションの UI メイン関数 (変更なし) ===
 def master_approval_app_v2():
     st.title("マスタ変更レビュー (縦型スクロールワークスペース)")
     st.markdown("---")
 
     # 1. データとセッション状態の初期化
-    with st.spinner('データをロード中...'):
-        df_merged, _ = load_all_mock_data()
+    # load_all_mock_data は st.cache_data でキャッシュされているため、
+    # df_merged の初期値はここでロードされ、セッションにコピーされます。
+    df_initial_merged, _ = load_all_mock_data()
     
     if 'df_merged' not in st.session_state:
-        st.session_state['df_merged'] = df_merged.copy()
+        st.session_state['df_merged'] = df_initial_merged.copy()
         
     if 'current_page' not in st.session_state:
         st.session_state['current_page'] = 1
@@ -267,10 +268,9 @@ def master_approval_app_v2():
                 # OK/NG チェック（ラジオボタン）
                 st.markdown("##### 💡 アクションを選択してください")
                 
-                # ラジオボタンのキーにIDを含めることで、フォーム送信時にどのレコードか識別できるようにする
                 st.radio(
                     "この変更をどうしますか？",
-                    options=['承認', '差し戻し', 'レビュー待ち'],
+                    options=list(STATUS_OPTIONS.keys()),
                     index=2, # デフォルトは「レビュー待ち」
                     format_func=lambda x: f"✅ {x}" if x=='承認' else (f"❌ {x}" if x=='差し戻し' else x),
                     key=f'action_{record_id}', # フォーム送信時にこのキーで値を取得
@@ -300,5 +300,4 @@ def master_approval_app_v2():
 
 # === アプリケーション実行 ===
 if __name__ == "__main__":
-    # session_stateの初期化は、アプリ実行前に必ず行う
     master_approval_app_v2()
