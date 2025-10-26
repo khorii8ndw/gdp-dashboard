@@ -4,15 +4,19 @@ import time
 from datetime import datetime
 import numpy as np
 
+# Streamlitのページ設定は必ずスクリプトの先頭で行う
+st.set_page_config(layout="wide")
+
 # --- 定数 ---
 CANDIDATE_TBL = "candidate_master_tbl"
 HISTORY_TBL = "approval_history_tbl"
 
-# === モックデータの準備 (再修正版: 比較ロジック強化) ===
+# === データの初期化/モックデータの準備 ===
+@st.cache_data
 def get_mock_data():
     """本番データと承認候補データを模擬"""
     
-    # 横に長いマスタを模擬 (10列)
+    # DataFrameの作成 (データ型の安定化のため、全て明示的に定義)
     data_production = {
         'id': [1, 2, 3, 4],
         'product_name': ["Alpha Widget", "Beta Gadget", "Gamma Thing", "Delta Plate"],
@@ -25,12 +29,11 @@ def get_mock_data():
     }
     df_prod = pd.DataFrame(data_production)
 
-    # 承認候補データ (変更点を含む)
     data_candidate = {
         'id': [1, 3, 4, 101, 102],
         'product_name': ["Alpha Widget", "Gamma Thing (Changed)", "Delta Plate", "New Item-X", "New Item-Y"], 
         'price': [100.0, 15.0, 70.0, 500.0, 75.0],                                            
-        'vendor_id': ['V001', 'V003', 'V005', 'V006', 'V007'], # V005は変更
+        'vendor_id': ['V001', 'V003', 'V005', 'V006', 'V007'], 
         'region': ['Tokyo', 'Fukuoka', 'Nagoya', 'Sapporo', 'Sendai'],                                
         'status': ['ACTIVE', 'DEPRECATED', 'ACTIVE', 'ACTIVE', 'ACTIVE'],
         'tax_code': ['A-10', 'A-10', 'B-20', 'C-30', 'A-10'],
@@ -39,39 +42,26 @@ def get_mock_data():
     }
     df_cand = pd.DataFrame(data_candidate)
     
-    review_cols = df_cand.columns.tolist()[:-1] # 最後のrequires_reviewを除外
-    
-    # 候補と本番をマージ
+    review_cols = df_cand.columns.tolist()[:-1] 
     df_merged = df_cand.merge(df_prod, on='id', how='left', suffixes=('_cand', '_prod'))
     
     # 変更フラグの列を作成
     for col in review_cols:
         if col != 'id':
-            
             col_cand = f'{col}_cand'
             col_prod = f'{col}_prod'
             col_changed = f'{col}_changed'
             
-            # 【修正点】比較のために、両方の列を文字列に変換してから NaN を '$$NONE$$' という特殊な文字列で埋める
-            # これにより、型ミスマッチと NaN/None の扱いの両方を安全にする
-            s_cand_str = df_merged[col_cand].astype(str).fillna('$$NONE$$')
-            s_prod_str = df_merged[col_prod].astype(str).fillna('$$NONE$$')
+            # 比較のために、文字列に変換し、NaN/NaTを特定の文字列で埋める
+            s_cand_str = df_merged[col_cand].astype(str).fillna('__NONE__')
+            s_prod_str = df_merged[col_prod].astype(str).fillna('__NONE__')
 
             # 値が変更されたかどうかのブーリアン列
             df_merged[col_changed] = (s_cand_str != s_prod_str)
             
-            # 【新規レコードの特別な扱い】
-            # prod_str が '$$NONE$$' であり、かつ cand_str が '$$NONE$$' ではない場合、それは新規レコード（変更あり）
-            is_new_record = (s_prod_str == '$$NONE$$') & (s_cand_str != '$$NONE$$')
-            
-            # 変更フラグに新規レコードを統合
-            df_merged[col_changed] = df_merged[col_changed] | is_new_record
-
-
     return df_merged
 
 # === 補助関数：縦型比較データの作成 ===
-# （この関数は、外部からアクセスされるため、以前の安全なロジックを維持）
 def create_vertical_diff(df_row: pd.Series):
     """選択された1レコードを縦型比較のためのDataFrameに変換"""
     data = []
@@ -84,7 +74,6 @@ def create_vertical_diff(df_row: pd.Series):
             col_prod = col.replace('_cand', '_prod')
             col_changed = f'{base_col}_changed'
             
-            # .get()を使用して KeyError を回避
             prod_value = df_row.get(col_prod, np.nan) 
             is_changed = df_row.get(col_changed, False)
             
@@ -115,34 +104,23 @@ def create_vertical_diff(df_row: pd.Series):
 
 # === 承認ロジックの模擬 (一括処理対応) ===
 def execute_action(selected_ids: list, action: str, reason: str):
-    # IDリストを文字列に変換
     ids_str = ", ".join(map(str, selected_ids))
     current_user = "MOCK_USER"
-    time.sleep(1) 
     
     st.info(f"合計 {len(selected_ids)} 件のレコードに対してアクション実行中... ({action})")
+    time.sleep(1) 
     
-    try:
-        if action == "APPROVE":
-            st.code(f"[処理模擬] MERGE INTO PRODUCTION_TBL WHERE id IN ({ids_str})")
-            st.code(f"INSERT INTO {HISTORY_TBL} VALUES ('{datetime.now().isoformat()}', '{current_user}', 'APPROVED', [{ids_str}], NULL)")
-            st.success(f"✅ 承認完了。レコードID {ids_str} が本番に展開されました。")
-        elif action == "REJECT":
-            st.code(f"DELETE FROM CANDIDATE_TBL WHERE id IN ({ids_str})")
-            st.code(f"INSERT INTO {HISTORY_TBL} VALUES ('{datetime.now().isoformat()}', '{current_user}', 'REJECTED', [{ids_str}], '{reason}')")
-            st.error(f"❌ 差し戻し完了。レコードID {ids_str} が候補テーブルから削除されました。")
-        
-        st.rerun() 
-
-    except Exception as e:
-        st.error("エラーが発生しました。処理は中断されました。")
-        st.exception(e)
-        st.rerun()
-
+    if action == "APPROVE":
+        st.success(f"✅ 承認完了。レコードID {ids_str} が本番に展開されました。(模擬)")
+    elif action == "REJECT":
+        st.error(f"❌ 差し戻し完了。レコードID {ids_str} が候補テーブルから削除されました。(模擬)")
+    
+    # 処理後、data_editorの状態をリセットするため、セッションキーを削除してrerun
+    del st.session_state['data_editor_state']
+    st.rerun() 
 
 # === アプリケーションの UI メイン関数 ===
 def master_approval_app():
-    st.set_page_config(layout="wide")
     st.title("マスタ変更レビュー (縦型比較 & 差分ハイライト)")
     st.markdown("---")
 
@@ -150,13 +128,14 @@ def master_approval_app():
     df_merged = get_mock_data()
     df_review = df_merged[df_merged['requires_review_cand'] == True]
 
-    # 【初期化の強化】
+    # 【初期化ロジックの強化】: アプリケーション実行時に必要なキーをすべて確保する
     if 'selected_record_id' not in st.session_state:
         st.session_state['selected_record_id'] = None
-    if 'radio_select_id' not in st.session_state:
-        st.session_state['radio_select_id'] = None
+    if 'detail_select_id' not in st.session_state:
+        st.session_state['detail_select_id'] = None
     if 'data_editor_state' not in st.session_state:
-        st.session_state['data_editor_state'] = None
+        # data_editor の状態は、初回は None または空のリストにしておく
+        st.session_state['data_editor_state'] = []
 
 
     if df_review.empty:
@@ -185,7 +164,8 @@ def master_approval_app():
             '変更列数がこれ以上のレコードを表示',
             min_value=0, 
             max_value=max_changes, 
-            value=0 # デフォルトはすべて表示
+            value=0,
+            key='change_filter_slider' 
         )
         
         df_filtered = df_summary[df_summary['変更列数'] >= min_changes].reset_index(drop=True)
@@ -198,10 +178,10 @@ def master_approval_app():
             
         # 2. データエディタでの一覧表示と選択
         
-        # 'select' 列を追加し、全てのレコードをデフォルトで未チェックにする
-        # Streamlitのdata_editorの挙動として、編集されていない行はセッションに残らないため、この方法を取る
+        # 'select' 列をデータフレームに追加 (st.data_editor の仕様)
         df_filtered['select'] = False 
         
+        # st.data_editor は key='data_editor_state' で状態を保持
         edited_df = st.data_editor(
             df_filtered,
             column_config={
@@ -215,7 +195,7 @@ def master_approval_app():
             disabled=("id", "変更列数"), 
             hide_index=True,
             use_container_width=True,
-            key='data_editor_state' # セッション状態で変更状態を保持
+            key='data_editor_state'
         )
 
         # ユーザーがチェックを入れたレコードのIDを取得 (一括承認用)
@@ -226,16 +206,17 @@ def master_approval_app():
 
         # 3. 単一レコードの縦型比較ビュー用IDの選択
         
-        # 詳細レビュー用IDの選択ロジック
         available_ids = df_filtered['id'].tolist()
         
-        # 前回選択したIDがリストから消えていたら、リストの最初のIDをデフォルトにする
-        if st.session_state.selected_record_id not in available_ids:
-            default_index = 0
-            st.session_state.selected_record_id = available_ids[0]
-        else:
+        # デフォルト選択のロジック
+        default_id = available_ids[0]
+        default_index = 0
+        
+        if st.session_state.selected_record_id in available_ids:
             default_index = available_ids.index(st.session_state.selected_record_id)
+            default_id = st.session_state.selected_record_id
 
+        # st.selectbox は key='detail_select_id' で状態を保持
         detail_review_id = st.selectbox(
             "詳細レビューするレコードを選択:",
             available_ids,
@@ -253,7 +234,6 @@ def master_approval_app():
         if st.session_state['selected_record_id'] is not None:
             st.subheader(f"ID: {st.session_state['selected_record_id']} の変更点レビュー")
             
-            # 選択された行を抽出
             selected_row_id = st.session_state['selected_record_id']
             # df_review（元の全レビュー対象）から行を抽出
             selected_row = df_review[df_review['id'] == selected_row_id].iloc[0]
