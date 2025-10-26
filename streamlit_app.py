@@ -137,8 +137,8 @@ def create_vertical_diff(df_row: pd.Series):
     else:
         return diff_df.style.apply(style_diff, axis=1) 
 
-# === 承認ロジックの模擬 (ページ単位で実行) (変更なし) ===
-def execute_page_action(df_page: pd.DataFrame, submitted_data: dict, current_page: int, total_pages: int):
+# === 承認ロジックの模擬 (ページ単位で実行) ===
+def execute_page_action(df_page: pd.DataFrame, bulk_approve_checked: bool, current_page: int, total_pages: int):
     
     processed_ids = []
     
@@ -146,8 +146,12 @@ def execute_page_action(df_page: pd.DataFrame, submitted_data: dict, current_pag
         record_id = row['id']
         action_key = f'action_{record_id}'
         
-        # フォーム送信時にst.session_stateに保存された値を取得
+        # 1. ラジオボタンの値を取得 (ユーザーが個別に操作した場合、この値が優先される)
         action_label = st.session_state.get(action_key)
+        
+        # 2. 一括承認フラグが立っている場合、ラジオボタンが 'レビュー待ち' のレコードを '承認' に上書き
+        if bulk_approve_checked and action_label == 'レビュー待ち':
+            action_label = '承認'
         
         # ラベルからコードを取得
         action = next((code for label, code in STATUS_OPTIONS.items() if label == action_label), STATUS_OPTIONS['レビュー待ち'])
@@ -162,13 +166,12 @@ def execute_page_action(df_page: pd.DataFrame, submitted_data: dict, current_pag
             processed_ids.append(record_id)
             
             # 処理後のラジオボタンの状態をクリアして次回描画に備える
-            # これを削除すると、次ページで前ページの選択が引き継がれてしまうため必要
             if action_key in st.session_state:
                  del st.session_state[action_key]
             
-    # 一括承認ボタンのデフォルト状態もクリア
-    if 'bulk_set_approve_flag' in st.session_state:
-        del st.session_state['bulk_set_approve_flag']
+    # 一括承認チェックボックスの状態をクリア (次回描画でチェックが外れるように)
+    if 'bulk_set_approve_checkbox' in st.session_state:
+        st.session_state['bulk_set_approve_checkbox'] = False
 
     if processed_ids:
         st.success(f"✅ このページで合計 **{len(processed_ids)} 件** のアクションが実行され、状態が更新されました。")
@@ -196,10 +199,6 @@ def master_approval_app_v3():
         
     if 'current_page' not in st.session_state:
         st.session_state['current_page'] = 1
-        
-    # 一括承認フラグを別のキーに変更し、フォーム外のロジックから切り離す
-    if 'bulk_set_approve_flag' not in st.session_state:
-        st.session_state['bulk_set_approve_flag'] = False
         
     # --- フィルタ設定エリア ---
     with st.expander("⚙️ レビュー対象のフィルタ設定", expanded=True):
@@ -265,6 +264,9 @@ def master_approval_app_v3():
     if 'last_filter_records' not in st.session_state or st.session_state['last_filter_records'] != total_records:
         st.session_state['current_page'] = 1
         st.session_state['last_filter_records'] = total_records
+        # フィルタ変更時に一括チェックボックスの状態もリセット
+        if 'bulk_set_approve_checkbox' in st.session_state:
+             st.session_state['bulk_set_approve_checkbox'] = False
 
     # ページネーションロジック
     start_index = (st.session_state['current_page'] - 1) * RECORDS_PER_PAGE
@@ -297,27 +299,15 @@ def master_approval_app_v3():
     # 【メインコンテンツ: 縦型レビューフォーム】
     # ---------------------------
 
-    # フォーム内のボタンが押された際のコールバック関数
-    def set_bulk_approve_callback():
-        # フォーム内のウィジェットの操作は、st.session_stateのウィジェットキーを通じて行う
-        for record_id in df_page['id']:
-            # ラジオボタンのキーが存在すれば '承認' に設定する
-            # Streamlitのフォーム内ウィジェットの値は、ウィジェットのキーでセッションステートに格納される
-            st.session_state[f'action_{record_id}'] = '承認'
-        
-        # このボタンを押した後、フォームの再描画は行われないが、フォーム送信時には値が反映される。
-        # ユーザーに伝わるように、フラグを立てておくと良いが、今回はロジック簡素化のため削除し、
-        # ユーザーに「フォームを送信してください」と伝えることに注力する。
-
     # Streamlit Form を使用して、ページ単位で一括送信を可能にする
     with st.form(key=f'review_form_{st.session_state["current_page"]}'):
         
-        # 【★修正箇所】一括承認ボタンをフォーム内に配置
-        st.button(
-            "✅ このページの全てを**承認**に設定", 
-            on_click=set_bulk_approve_callback, 
-            type="secondary",
-            use_container_width=False
+        # 【★修正箇所】一括チェック機能はチェックボックスに置き換え、フォーム内のキーとして使用
+        st.checkbox(
+            "このページの**「レビュー待ち」**レコードを、**一括で承認**する",
+            value=st.session_state.get('bulk_set_approve_checkbox', False),
+            key='bulk_set_approve_checkbox',
+            help="このチェックボックスをオンにしてフォームを送信すると、個別に「承認」または「差し戻し」が選択されていないレコードは全て「承認」として処理されます。",
         )
         st.markdown("---")
         
@@ -325,12 +315,10 @@ def master_approval_app_v3():
         for index, row in df_page.iterrows():
             record_id = row['id']
             
-            # デフォルト値の決定:
-            # 1. ユーザーが既に操作している場合は、その値がセッションステートにあるため、その値が優先される。
-            # 2. ユーザーが操作していない場合、ここで設定した index が使われる。
-            # 3. フォーム内の「一括承認ボタン」を押すと、st.session_state[f'action_{record_id}'] が '承認' になり、
-            #    それが優先されて次回描画時にラジオボタンが '承認' に設定される。
-            default_index = OPTIONS_JP.index(st.session_state.get(f'action_{record_id}', 'レビュー待ち'))
+            # デフォルトインデックスの決定
+            # ユーザー操作が優先されるため、セッションステートに値があればそれをデコードしてインデックスを設定
+            current_label = st.session_state.get(f'action_{record_id}')
+            default_index = OPTIONS_JP.index(current_label) if current_label in OPTIONS_JP else OPTIONS_JP.index('レビュー待ち')
             
             # 各レコードのコンテナ
             with st.container(border=True):
@@ -359,7 +347,6 @@ def master_approval_app_v3():
                 st.radio(
                     "この変更をどうしますか？",
                     options=OPTIONS_JP,
-                    # 一括ボタンで st.session_state に値がセットされている場合はそれが反映される
                     index=default_index, 
                     format_func=lambda x: f"✅ {x}" if x=='承認' else (f"❌ {x}" if x=='差し戻し' else x),
                     key=f'action_{record_id}', # フォーム送信時にこのキーで値を取得
@@ -379,8 +366,11 @@ def master_approval_app_v3():
         )
 
         if submitted:
-            # execute_page_actionで処理を実行
-            execute_page_action(df_page, None, st.session_state['current_page'], total_pages)
+            # チェックボックスの状態をフォーム送信時に取得
+            bulk_checked = st.session_state.get('bulk_set_approve_checkbox', False)
+            
+            # 処理を実行
+            execute_page_action(df_page, bulk_checked, st.session_state['current_page'], total_pages)
 
 
 # === アプリケーション実行 ===
