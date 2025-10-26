@@ -11,7 +11,7 @@ st.set_page_config(layout="wide")
 CANDIDATE_TBL = "candidate_master_tbl"
 HISTORY_TBL = "approval_history_tbl"
 
-# === データの初期化/モックデータの準備 (初回起動時のみ実行) ===
+# === データの初期化/モックデータの準備 (変更なし) ===
 @st.cache_data(show_spinner=False)
 def load_all_mock_data():
     """本番データと承認候補データを模擬し、全レビュー対象データを一度だけロードする"""
@@ -60,78 +60,63 @@ def load_all_mock_data():
     return df_merged, initial_review_ids
 
 
-# === 補助関数 1：変更サマリーの自動生成 (変更なし) ===
+# === 補助関数 (変更なし) ===
 def create_vertical_summary(df_row: pd.Series):
-    """変更された項目とその差分を抽出し、自然言語のサマリーを生成する"""
+    # ... (ロジックは変更なし) ...
     is_new_record = pd.isna(df_row.get('product_name_prod', np.nan)) 
-    
     if is_new_record:
         return f"**新規レコード**が登録されようとしています。これは完全に新しいマスタエントリです。"
-        
     changes = []
-    
     for key, is_changed in df_row.filter(like='_changed').items():
         if is_changed:
             base_col = key.replace('_changed', '')
             col_name = base_col.replace('_', ' ').title()
-            
             val_prod = df_row.get(f'{base_col}_prod', 'N/A')
             val_cand = df_row.get(f'{base_col}_cand', 'N/A')
-            
             if base_col == 'created_date':
                  changes.append(f"作成日 ({col_name}) が更新されました。")
             elif val_prod == '__NONE__':
                  changes.append(f"{col_name} が {val_cand} に設定されました。")
             else:
                  changes.append(f"{col_name} が **{val_prod}** から **{val_cand}** に変更されました。")
-
     if changes:
         return "**既存レコードの変更点:** " + " ".join(changes)
     else:
         return "このレコードには明らかな変更点はありません。(エラーの可能性)"
 
-
-# === 補助関数 2：縦型比較データの作成 (変更なし) ===
 def create_vertical_diff(df_row: pd.Series):
+    # ... (ロジックは変更なし) ...
     data = []
     all_cols = set(df_row.index) 
-    
     for col in all_cols:
         if col.endswith('_cand') and col not in ['requires_review_cand']:
             base_col = col.replace('_cand', '')
-            
             col_prod = col.replace('_cand', '_prod')
             col_changed = f'{base_col}_changed'
-            
             prod_value = df_row.get(col_prod, np.nan) 
             is_changed = df_row.get(col_changed, False)
-            
             if pd.isna(prod_value):
                  prod_display = 'N/A (新規レコード)'
             else:
                  prod_display = prod_value
-
             data.append({
                 '項目': base_col.replace('_', ' ').title(),
                 '変更前 (Production)': prod_display,
                 '変更後 (Candidate)': df_row[col],
                 '差分あり': is_changed
             })
-    
     diff_df = pd.DataFrame(data)
-    
     def style_diff(s):
         if '差分あり' in s.index:
             return ['background-color: #ffe6e6' if s['差分あり'] else ''] * len(s)
         return [''] * len(s)
-
     if '差分あり' in diff_df.columns:
         return diff_df.drop(columns=['差分あり']).style.apply(style_diff, axis=1)
     else:
         return diff_df.style.apply(style_diff, axis=1) 
 
-# === 承認ロジックの模擬 (低負荷対応版) ===
 def execute_action(selected_ids: list, action: str, reason: str, available_ids: list, current_id: int):
+    # ... (ロジックは変更なし) ...
     
     st.info(f"合計 {len(selected_ids)} 件のレコードに対してアクション実行中... ({action})")
     time.sleep(0.5)
@@ -141,13 +126,11 @@ def execute_action(selected_ids: list, action: str, reason: str, available_ids: 
     elif action == "REJECT":
         st.error(f"❌ 差し戻し完了。レコードID {selected_ids} が候補テーブルから削除されました。(模擬)")
     
-    # 1. セッション状態のIDリストから処理済みIDを削除
     if 'all_review_ids' in st.session_state:
         st.session_state['all_review_ids'] = [
             id_val for id_val in st.session_state['all_review_ids'] if id_val not in selected_ids
         ]
     
-    # 2. 次のレコードIDを決定し、セッションにセット
     new_available_ids = [id_val for id_val in available_ids if id_val not in selected_ids]
     
     if not new_available_ids:
@@ -166,7 +149,6 @@ def execute_action(selected_ids: list, action: str, reason: str, available_ids: 
         elif new_available_ids:
             st.session_state['selected_record_id'] = new_available_ids[0]
 
-    # 3. data_editorの状態をリセット
     if 'data_editor_state_existing' in st.session_state:
         del st.session_state['data_editor_state_existing']
     if 'data_editor_state_new' in st.session_state:
@@ -174,31 +156,54 @@ def execute_action(selected_ids: list, action: str, reason: str, available_ids: 
 
     st.rerun() 
 
+# === 新規追加: コールバック処理をセッションに中継するラッパー関数 ===
+def set_action_type(action: str):
+    """ButtonColumnのon_clickから呼ばれ、実行するアクションをセッションに保存する"""
+    st.session_state['triggered_action'] = action
+    # ButtonColumnは行インデックスも自動で引数に渡すが、ここでは無視する
 
-# === data_editorのボタンが押された時のコールバック関数 (修正版) ===
-def handle_single_action(action: str, index: int):
-    """
-    ButtonColumnのon_clickから呼ばれる。
-    index: フィルタリング後のDataFrameにおける、ボタンが押された行のインデックス。
-    """
+
+# === data_editorのボタンが押された時のコールバック関数 (最終修正版) ===
+# ButtonColumnは on_click で、argsの後に **行インデックス** を自動的に渡します。
+# しかし、今回は ButtonColumn の引数から args を削除したため、自動で渡される引数はありません。
+# 代わりに、data_editor の編集履歴からどの行が押されたかを特定します。
+def handle_single_action():
+    """ButtonColumnのon_clickから呼ばれる。アクション種別はセッションから取得する。"""
     
+    action = st.session_state.get('triggered_action')
     group_key = st.session_state['selected_group']
+    editor_key = f'data_editor_state_{group_key}'
     df_review = st.session_state.get(f'df_filtered_{group_key}')
     
-    if df_review is not None and 0 <= index < len(df_review):
-        
-        # フィルタリング後のDFから直接IDを取得
-        triggered_id = df_review.iloc[index]['id']
-        
-        # 現在の全レビューIDリスト、処理対象IDリストを取得
-        available_ids = st.session_state.get('current_available_ids', []) 
-        current_id = st.session_state.get('selected_record_id')
+    if action is None or df_review is None:
+        return # 必要な情報がないため何もしない
 
-        # アクション実行に移る
-        execute_action([triggered_id], action, st.session_state.get('reason_area', '理由なし'), available_ids, current_id)
-    else:
-         # 通常は発生しないが、エラー防止のため
-         st.error("レコードの特定に失敗しました。アプリケーションをリロードしてください。")
+    if editor_key in st.session_state and st.session_state[editor_key].get('edited_rows'):
+        
+        edited_rows = st.session_state[editor_key]['edited_rows']
+        
+        # 最後に編集された行（ボタンが押された行）のインデックスを見つける
+        triggered_index = -1
+        # ButtonColumnが押されたとき、その列名に対応するedited_rowsに何らかの値がセットされる
+        action_col = '承認' if action == 'APPROVE' else '差し戻し'
+        
+        for idx, row_dict in edited_rows.items():
+            if action_col in row_dict:
+                triggered_index = idx
+                break
+        
+        if triggered_index != -1 and 0 <= triggered_index < len(df_review):
+            triggered_id = df_review.iloc[triggered_index]['id']
+            
+            # 現在の全レビューIDリスト、処理対象IDリストを取得
+            available_ids = st.session_state.get('current_available_ids', []) 
+            current_id = st.session_state.get('selected_record_id')
+
+            # アクション実行に移る
+            execute_action([triggered_id], action, st.session_state.get('reason_area', '理由なし'), available_ids, current_id)
+        
+        # 処理が終わったらアクション種別をクリア
+        del st.session_state['triggered_action']
 
 
 # === リスト描画補助関数 (アクションボタン列の追加とデータ保存) ===
@@ -216,7 +221,6 @@ def render_review_list(df_data, group_key):
         key=f'change_filter_slider_{group_key}' 
     )
     
-    # フィルタリングの結果
     df_filtered = df_data[df_data['変更列数'] >= min_changes].reset_index(drop=True)
     
     if df_filtered.empty:
@@ -225,7 +229,7 @@ def render_review_list(df_data, group_key):
         
     st.markdown("---")
     
-    # 【重要】ButtonColumnのコールバック処理のために、フィルタリング後のDFをセッションに一時保存
+    # コールバック処理のために、フィルタリング後のDFをセッションに一時保存
     st.session_state[f'df_filtered_{group_key}'] = df_filtered.copy()
 
     # アクションボタンの列を追加
@@ -238,13 +242,15 @@ def render_review_list(df_data, group_key):
         column_config={
             "select": st.column_config.CheckboxColumn("一括対象", default=False),
             "変更列数": st.column_config.NumberColumn("変更列数", width='small'),
-            # 【修正点】on_clickのargsで action のみを渡し、indexはButtonColumnが自動で渡す
-            "承認": st.column_config.ButtonColumn("個別承認", help="このレコードのみを承認します", width='small', on_click=handle_single_action, args=['APPROVE']),
-            "差し戻し": st.column_config.ButtonColumn("個別差し戻し", help="このレコードのみを差し戻します", width='small', on_click=handle_single_action, args=['REJECT'])
+            # 【最終修正点】on_clickに引数を渡さないラッパー関数を使用し、handle_single_actionを実行
+            "承認": st.column_config.ButtonColumn("個別承認", help="このレコードのみを承認します", width='small', on_click=lambda: set_action_type('APPROVE')),
+            "差し戻し": st.column_config.ButtonColumn("個別差し戻し", help="このレコードのみを差し戻します", width='small', on_click=lambda: set_action_type('REJECT'))
         },
         disabled=("id", "変更列数"), 
         hide_index=True,
         use_container_width=True,
+        # on_changeで行の編集が発生したときに handle_single_action を呼び出す
+        on_change=handle_single_action,
         key=f'data_editor_state_{group_key}' 
     )
 
@@ -299,7 +305,7 @@ def master_approval_app():
 
         current_df_data = df_existing if st.session_state['selected_group'] == 'existing' else df_new
 
-        # 4. リスト描画 (フィルタリングとデータエディタ)
+        # 4. リスト描画
         if current_df_data.empty:
             st.info(f"選択されたグループにレビュー対象レコードはありません。")
             df_filtered, selected_ids_for_action, available_ids = pd.DataFrame(), [], []
@@ -309,25 +315,26 @@ def master_approval_app():
                 st.session_state['selected_group']
             )
         
-        st.session_state['current_available_ids'] = available_ids # コールバック用
+        st.session_state['current_available_ids'] = available_ids 
 
         # 5. 詳細レビューIDの決定と単体アクションのトリガー
         if available_ids:
             
-            # 選択IDが現在のリストに存在しない場合、最初のIDを強制的に選択
             if st.session_state.selected_record_id not in available_ids:
                 st.session_state['selected_record_id'] = available_ids[0]
             
-            # 【新方式】data_editorの選択行を詳細ビューに反映
+            # data_editorの選択行を詳細ビューに反映
             editor_key = f'data_editor_state_{st.session_state["selected_group"]}'
-            if st.session_state[editor_key].get('selection') and st.session_state[editor_key]['selection']['rows']:
-                selected_row_index = st.session_state[editor_key]['selection']['rows'][0]
-                new_selected_id = df_filtered.iloc[selected_row_index]['id']
+            selection = st.session_state[editor_key].get('selection', {})
+            
+            if selection and selection.get('rows'):
+                selected_row_index = selection['rows'][0]
+                # filtered DFは data_editor と同じ順序なので、ilocでIDを取得
+                new_selected_id = df_filtered.iloc[selected_row_index]['id'] 
                 st.session_state['selected_record_id'] = new_selected_id
-            else:
-                 # 選択が解除されたり、選択がない場合は、リストの最初を選択IDとする
+            elif available_ids:
+                 # 選択がない場合は、リストの最初を選択IDとする
                  st.session_state['selected_record_id'] = available_ids[0]
-
         else:
             st.session_state['selected_record_id'] = None
                 
@@ -343,13 +350,11 @@ def master_approval_app():
             selected_row = df_merged[df_merged['id'] == current_id].iloc[0]
             
             st.subheader(f"ID: {current_id} の変更点レビュー (確認用)")
-            st.markdown(f"左側のリストでこの行を**クリック**すると、詳細が切り替わります。")
+            st.markdown(f"左側のリストの行を**クリック**すると、詳細が切り替わります。アクションは左側の一覧で行えます。")
 
-            # 変更サマリーの表示
             summary_text = create_vertical_summary(selected_row)
             st.info(summary_text)
 
-            # 縦型比較データフレームを作成し表示
             st.markdown("##### 項目別 差分詳細")
             st.dataframe(
                 create_vertical_diff(selected_row),
