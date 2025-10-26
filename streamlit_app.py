@@ -13,10 +13,10 @@ RECORDS_PER_PAGE = 10 # ページごとの表示件数
 STATUS_OPTIONS = {'レビュー待ち': 'PENDING', '承認': 'APPROVE', '差し戻し': 'REJECT'}
 OPTIONS_JP = list(STATUS_OPTIONS.keys())
 
-# === データの初期化/モックデータの準備 (KeyError修正) ===
+# === データの初期化/モックデータの準備 (安定版を使用) ===
 @st.cache_data(show_spinner=False)
 def load_all_mock_data():
-    """データロードロジック（KeyError修正）"""
+    """データロードロジック"""
     
     # データを増やすために1〜25番まで追加
     data_production = {
@@ -65,7 +65,6 @@ def load_all_mock_data():
 
         df_merged[col_changed] = (s_cand_str != s_prod_str)
             
-    # 【★修正箇所】カラム名を 'requires_review_cand' に修正
     df_merged['review_status'] = df_merged['requires_review_cand'].apply(
         lambda x: STATUS_OPTIONS['レビュー待ち'] if x else STATUS_OPTIONS['承認']
     )
@@ -75,7 +74,7 @@ def load_all_mock_data():
     
     return df_merged
 
-# === 補助関数 1：変更サマリーの自動生成 (変更なし) ===
+# === 補助関数 (変更なし) ===
 def create_vertical_summary(df_row: pd.Series):
     is_new_record = pd.isna(df_row.get('product_name_prod', np.nan)) 
     
@@ -101,7 +100,6 @@ def create_vertical_summary(df_row: pd.Series):
     else:
         return "このレコードには明らかな変更点はありません。(エラーの可能性)"
 
-# === 補助関数 2：縦型比較データの作成 (変更なし) ===
 def create_vertical_diff(df_row: pd.Series):
     data = []
     all_cols = set(df_row.index) 
@@ -148,8 +146,10 @@ def execute_page_action(df_page: pd.DataFrame, submitted_data: dict, current_pag
         record_id = row['id']
         action_key = f'action_{record_id}'
         
+        # フォーム送信時にst.session_stateに保存された値を取得
         action_label = st.session_state.get(action_key)
         
+        # ラベルからコードを取得
         action = next((code for label, code in STATUS_OPTIONS.items() if label == action_label), STATUS_OPTIONS['レビュー待ち'])
         
         if action != STATUS_OPTIONS['レビュー待ち']:
@@ -162,11 +162,13 @@ def execute_page_action(df_page: pd.DataFrame, submitted_data: dict, current_pag
             processed_ids.append(record_id)
             
             # 処理後のラジオボタンの状態をクリアして次回描画に備える
-            del st.session_state[action_key]
+            # これを削除すると、次ページで前ページの選択が引き継がれてしまうため必要
+            if action_key in st.session_state:
+                 del st.session_state[action_key]
             
     # 一括承認ボタンのデフォルト状態もクリア
-    if 'bulk_set_approve' in st.session_state:
-        del st.session_state['bulk_set_approve']
+    if 'bulk_set_approve_flag' in st.session_state:
+        del st.session_state['bulk_set_approve_flag']
 
     if processed_ids:
         st.success(f"✅ このページで合計 **{len(processed_ids)} 件** のアクションが実行され、状態が更新されました。")
@@ -182,7 +184,7 @@ def execute_page_action(df_page: pd.DataFrame, submitted_data: dict, current_pag
 
     st.rerun()
 
-# === アプリケーションの UI メイン関数 (変更なし) ===
+# === アプリケーションの UI メイン関数 ===
 def master_approval_app_v3():
     st.title("マスタ変更レビュー (縦型スクロールワークスペース)")
 
@@ -195,8 +197,9 @@ def master_approval_app_v3():
     if 'current_page' not in st.session_state:
         st.session_state['current_page'] = 1
         
-    if 'bulk_set_approve' not in st.session_state:
-        st.session_state['bulk_set_approve'] = False
+    # 一括承認フラグを別のキーに変更し、フォーム外のロジックから切り離す
+    if 'bulk_set_approve_flag' not in st.session_state:
+        st.session_state['bulk_set_approve_flag'] = False
         
     # --- フィルタ設定エリア ---
     with st.expander("⚙️ レビュー対象のフィルタ設定", expanded=True):
@@ -207,7 +210,8 @@ def master_approval_app_v3():
                 "レコード種別",
                 options=['全て', '新規レコード', '既存レコード変更'],
                 index=0,
-                horizontal=True
+                horizontal=True,
+                key='filter_group_radio'
             )
         
         # フィルタリング用の日付の最小値/最大値を取得
@@ -219,14 +223,16 @@ def master_approval_app_v3():
                 "更新開始日", 
                 value=min_date, 
                 min_value=min_date, 
-                max_value=max_date
+                max_value=max_date,
+                key='filter_date_start'
             )
         with col_date_end:
             filter_date_end = st.date_input(
                 "更新終了日", 
                 value=max_date, 
                 min_value=min_date, 
-                max_value=max_date
+                max_value=max_date,
+                key='filter_date_end'
             )
 
     # 2. フィルタの適用
@@ -277,6 +283,7 @@ def master_approval_app_v3():
     with col_page_nav:
         
         col_prev, col_next = st.columns(2)
+        # on_click はフォーム外のボタンなのでそのまま使用可能
         with col_prev:
             if st.session_state['current_page'] > 1:
                 st.button("前のページへ", on_click=lambda: st.session_state.update({'current_page': st.session_state['current_page'] - 1}), use_container_width=True)
@@ -290,20 +297,27 @@ def master_approval_app_v3():
     # 【メインコンテンツ: 縦型レビューフォーム】
     # ---------------------------
 
-    # 一括承認ボタンが押された際のコールバック関数
+    # フォーム内のボタンが押された際のコールバック関数
     def set_bulk_approve_callback():
-        # フラグをTrueにするだけで、フォーム内のラジオボタンのデフォルト値が次回描画時に変わる
-        st.session_state['bulk_set_approve'] = True
+        # フォーム内のウィジェットの操作は、st.session_stateのウィジェットキーを通じて行う
+        for record_id in df_page['id']:
+            # ラジオボタンのキーが存在すれば '承認' に設定する
+            # Streamlitのフォーム内ウィジェットの値は、ウィジェットのキーでセッションステートに格納される
+            st.session_state[f'action_{record_id}'] = '承認'
+        
+        # このボタンを押した後、フォームの再描画は行われないが、フォーム送信時には値が反映される。
+        # ユーザーに伝わるように、フラグを立てておくと良いが、今回はロジック簡素化のため削除し、
+        # ユーザーに「フォームを送信してください」と伝えることに注力する。
 
     # Streamlit Form を使用して、ページ単位で一括送信を可能にする
     with st.form(key=f'review_form_{st.session_state["current_page"]}'):
         
-        # === フォーム上部: 一括チェックボタン ===
+        # 【★修正箇所】一括承認ボタンをフォーム内に配置
         st.button(
             "✅ このページの全てを**承認**に設定", 
             on_click=set_bulk_approve_callback, 
             type="secondary",
-            use_container_width=False # ページ上のボタンは幅を抑える
+            use_container_width=False
         )
         st.markdown("---")
         
@@ -311,9 +325,12 @@ def master_approval_app_v3():
         for index, row in df_page.iterrows():
             record_id = row['id']
             
-            # ページの一括ボタンが押された場合、デフォルト値を '承認' (Index 0) に設定する
-            # そうでない場合は、デフォルト値を 'レビュー待ち' (Index 2) に設定する
-            default_index = 0 if st.session_state['bulk_set_approve'] else 2
+            # デフォルト値の決定:
+            # 1. ユーザーが既に操作している場合は、その値がセッションステートにあるため、その値が優先される。
+            # 2. ユーザーが操作していない場合、ここで設定した index が使われる。
+            # 3. フォーム内の「一括承認ボタン」を押すと、st.session_state[f'action_{record_id}'] が '承認' になり、
+            #    それが優先されて次回描画時にラジオボタンが '承認' に設定される。
+            default_index = OPTIONS_JP.index(st.session_state.get(f'action_{record_id}', 'レビュー待ち'))
             
             # 各レコードのコンテナ
             with st.container(border=True):
@@ -328,7 +345,7 @@ def master_approval_app_v3():
                     summary_text = create_vertical_summary(row)
                     st.info(summary_text)
 
-                # 変更詳細 (「モーダル」の代わりに、ボタン操作に見えるように調整)
+                # 変更詳細
                 with st.expander("🔍 差分詳細を確認（クリックで開閉）"):
                     st.dataframe(
                         create_vertical_diff(row),
@@ -342,9 +359,7 @@ def master_approval_app_v3():
                 st.radio(
                     "この変更をどうしますか？",
                     options=OPTIONS_JP,
-                    # 注意: ラジオボタンはフォーム外でデフォルトインデックスを設定しても、
-                    # ユーザーが操作するとセッションステートに値が残り、その値が優先される。
-                    # フォーム内の要素なので、フォーム送信時以外はセッションステートを参照させないようにする
+                    # 一括ボタンで st.session_state に値がセットされている場合はそれが反映される
                     index=default_index, 
                     format_func=lambda x: f"✅ {x}" if x=='承認' else (f"❌ {x}" if x=='差し戻し' else x),
                     key=f'action_{record_id}', # フォーム送信時にこのキーで値を取得
