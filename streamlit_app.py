@@ -12,6 +12,7 @@ CANDIDATE_TBL = "candidate_master_tbl"
 HISTORY_TBL = "approval_history_tbl"
 
 # === データの初期化/モックデータの準備 ===
+# @st.cache_data を使用して、データ読み込みをキャッシュし、パフォーマンスと安定性を向上
 @st.cache_data
 def get_mock_data():
     """本番データと承認候補データを模擬"""
@@ -52,11 +53,9 @@ def get_mock_data():
             col_prod = f'{col}_prod'
             col_changed = f'{col}_changed'
             
-            # 比較のために、文字列に変換し、NaN/NaTを特定の文字列で埋める
             s_cand_str = df_merged[col_cand].astype(str).fillna('__NONE__')
             s_prod_str = df_merged[col_prod].astype(str).fillna('__NONE__')
 
-            # 値が変更されたかどうかのブーリアン列
             df_merged[col_changed] = (s_cand_str != s_prod_str)
             
     return df_merged
@@ -77,7 +76,6 @@ def create_vertical_diff(df_row: pd.Series):
             prod_value = df_row.get(col_prod, np.nan) 
             is_changed = df_row.get(col_changed, False)
             
-            # Production の値が NaN の場合（新規レコード）は「N/A (新規レコード)」と表示
             if pd.isna(prod_value):
                  prod_display = 'N/A (新規レコード)'
             else:
@@ -116,25 +114,26 @@ def execute_action(selected_ids: list, action: str, reason: str):
         st.error(f"❌ 差し戻し完了。レコードID {ids_str} が候補テーブルから削除されました。(模擬)")
     
     # 処理後、data_editorの状態をリセットするため、セッションキーを削除してrerun
-    del st.session_state['data_editor_state']
+    if 'data_editor_state' in st.session_state:
+        del st.session_state['data_editor_state']
     st.rerun() 
+
 
 # === アプリケーションの UI メイン関数 ===
 def master_approval_app():
     st.title("マスタ変更レビュー (縦型比較 & 差分ハイライト)")
     st.markdown("---")
 
-    # 1. データの準備とセッション状態の初期化
+    # 1. データの準備
     df_merged = get_mock_data()
     df_review = df_merged[df_merged['requires_review_cand'] == True]
 
-    # 【初期化ロジックの強化】: アプリケーション実行時に必要なキーをすべて確保する
+    # 【初期化の強化】
     if 'selected_record_id' not in st.session_state:
         st.session_state['selected_record_id'] = None
     if 'detail_select_id' not in st.session_state:
         st.session_state['detail_select_id'] = None
     if 'data_editor_state' not in st.session_state:
-        # data_editor の状態は、初回は None または空のリストにしておく
         st.session_state['data_editor_state'] = []
 
 
@@ -163,7 +162,7 @@ def master_approval_app():
         min_changes = st.slider(
             '変更列数がこれ以上のレコードを表示',
             min_value=0, 
-            max_value=max_changes, 
+            max_value=max_changes if max_changes > 0 else 0, # max_changesが0の場合を考慮
             value=0,
             key='change_filter_slider' 
         )
@@ -172,66 +171,71 @@ def master_approval_app():
         
         if df_filtered.empty:
             st.info("フィルタ条件を満たすレコードはありません。")
-            st.stop()
+            # このブロック内で処理を終了せず、次のUI描画に進める
+            available_ids = []
+        else:
+            available_ids = df_filtered['id'].tolist()
             
-        st.markdown("---")
+            st.markdown("---")
+                
+            # 2. データエディタでの一覧表示と選択
             
-        # 2. データエディタでの一覧表示と選択
-        
-        # 'select' 列をデータフレームに追加 (st.data_editor の仕様)
-        df_filtered['select'] = False 
-        
-        # st.data_editor は key='data_editor_state' で状態を保持
-        edited_df = st.data_editor(
-            df_filtered,
-            column_config={
-                "select": st.column_config.CheckboxColumn(
-                    "アクション対象",
-                    help="承認/差し戻しのアクション対象としてマーク",
-                    default=False
-                ),
-                "変更列数": st.column_config.NumberColumn("変更列数")
-            },
-            disabled=("id", "変更列数"), 
-            hide_index=True,
-            use_container_width=True,
-            key='data_editor_state'
-        )
+            df_filtered['select'] = False 
+            
+            edited_df = st.data_editor(
+                df_filtered,
+                column_config={
+                    "select": st.column_config.CheckboxColumn(
+                        "アクション対象",
+                        help="承認/差し戻しのアクション対象としてマーク",
+                        default=False
+                    ),
+                    "変更列数": st.column_config.NumberColumn("変更列数")
+                },
+                disabled=("id", "変更列数"), 
+                hide_index=True,
+                use_container_width=True,
+                key='data_editor_state'
+            )
 
-        # ユーザーがチェックを入れたレコードのIDを取得 (一括承認用)
-        selected_ids_for_action = edited_df[edited_df.select]['id'].tolist()
-        
-        st.info(f"現在、**{len(selected_ids_for_action)}** 件のレコードが選択されています。")
-        st.markdown("---")
+            # ユーザーがチェックを入れたレコードのIDを取得 (一括承認用)
+            selected_ids_for_action = edited_df[edited_df.select]['id'].tolist()
+            
+            st.info(f"現在、**{len(selected_ids_for_action)}** 件のレコードが選択されています。")
+            st.markdown("---")
 
-        # 3. 単一レコードの縦型比較ビュー用IDの選択
-        
-        available_ids = df_filtered['id'].tolist()
-        
-        # デフォルト選択のロジック
-        default_id = available_ids[0]
-        default_index = 0
-        
-        if st.session_state.selected_record_id in available_ids:
-            default_index = available_ids.index(st.session_state.selected_record_id)
-            default_id = st.session_state.selected_record_id
-
-        # st.selectbox は key='detail_select_id' で状態を保持
-        detail_review_id = st.selectbox(
-            "詳細レビューするレコードを選択:",
-            available_ids,
-            index=default_index,
-            key='detail_select_id',
-        )
-        
-        # 選択IDをセッションに保存
-        st.session_state['selected_record_id'] = detail_review_id
-
+            # 3. 単一レコードの縦型比較ビュー用IDの選択
+            
+            # **【修正ロジックの核】** available_ids が空でない場合にのみ selectbox を描画
+            if available_ids:
+                
+                # デフォルト選択のロジック
+                default_id = available_ids[0]
+                default_index = 0
+                
+                if st.session_state.selected_record_id in available_ids:
+                    # 以前の選択IDが現在のリストに存在する場合
+                    default_index = available_ids.index(st.session_state.selected_record_id)
+                    default_id = st.session_state.selected_record_id
+                
+                # st.selectbox
+                detail_review_id = st.selectbox(
+                    "詳細レビューするレコードを選択:",
+                    available_ids,
+                    index=default_index,
+                    key='detail_select_id',
+                )
+                st.session_state['selected_record_id'] = detail_review_id
+            else:
+                st.session_state['selected_record_id'] = None
+                
     # ---------------------------
     # 【右カラム: 縦型比較とアクション実行】
     # ---------------------------
     with col_detail:
+        # **【修正ロジックの核】** 選択IDが有効な場合にのみ描画
         if st.session_state['selected_record_id'] is not None:
+            
             st.subheader(f"ID: {st.session_state['selected_record_id']} の変更点レビュー")
             
             selected_row_id = st.session_state['selected_record_id']
@@ -250,7 +254,7 @@ def master_approval_app():
             # 4. アクションエリア (一括承認)
             st.subheader("一括承認/差し戻し")
             
-            if not selected_ids_for_action:
+            if 'selected_ids_for_action' not in locals() or not selected_ids_for_action:
                 st.warning("アクション対象としてレコードが一つも選択されていません。")
             else:
                 col_btn_app, col_btn_rej = st.columns(2)
@@ -264,6 +268,9 @@ def master_approval_app():
                 if approve_button or reject_button:
                     action = "APPROVE" if approve_button else "REJECT"
                     execute_action(selected_ids_for_action, action, reason)
+        else:
+            # フィルタリングの結果、何も選択されていない場合のメッセージ
+            st.info("左側のリストでレコードを選択してください。")
 
 
 # === アプリケーション実行 ===
