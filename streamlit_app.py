@@ -58,7 +58,42 @@ def get_mock_data():
             
     return df_merged
 
-# === 補助関数：縦型比較データの作成 ===
+# === 補助関数 1：変更サマリーの自動生成 (新機能) ===
+def create_vertical_summary(df_row: pd.Series):
+    """変更された項目とその差分を抽出し、自然言語のサマリーを生成する"""
+    
+    is_new_record = pd.isna(df_row.get('product_name_prod', np.nan)) # prodの代表列がNaNなら新規
+    
+    if is_new_record:
+        summary_text = f"**新規レコード**が登録されようとしています。"
+        return summary_text
+        
+    changes = []
+    
+    for key, is_changed in df_row.filter(like='_changed').items():
+        if is_changed:
+            base_col = key.replace('_changed', '')
+            col_name = base_col.replace('_', ' ').title()
+            
+            val_prod = df_row.get(f'{base_col}_prod', 'N/A')
+            val_cand = df_row.get(f'{base_col}_cand', 'N/A')
+            
+            # 低リスク項目（例: created_date）はサマリーを簡略化
+            if base_col == 'created_date':
+                 changes.append(f"作成日 ({col_name}) が更新されました。")
+            elif val_prod == '__NONE__':
+                 # 新規レコードではないが、特定のProd値がNULLから値になった場合
+                 changes.append(f"{col_name} が {val_cand} に設定されました。")
+            else:
+                 changes.append(f"{col_name} が **{val_prod}** から **{val_cand}** に変更されました。")
+
+    if changes:
+        return "**既存レコードの変更点:** " + " ".join(changes)
+    else:
+        return "このレコードには明らかな変更点はありません。(エラーの可能性)"
+
+
+# === 補助関数 2：縦型比較データの作成 (変更なし) ===
 def create_vertical_diff(df_row: pd.Series):
     """選択された1レコードを縦型比較のためのDataFrameに変換"""
     data = []
@@ -71,7 +106,6 @@ def create_vertical_diff(df_row: pd.Series):
             col_prod = col.replace('_cand', '_prod')
             col_changed = f'{base_col}_changed'
             
-            # 安全に値をゲット
             prod_value = df_row.get(col_prod, np.nan) 
             is_changed = df_row.get(col_changed, False)
             
@@ -99,7 +133,7 @@ def create_vertical_diff(df_row: pd.Series):
     else:
         return diff_df.style.apply(style_diff, axis=1) 
 
-# === 承認ロジックの模擬 (一括処理対応) ===
+# === 承認ロジックの模擬 (変更なし) ===
 def execute_action(selected_ids: list, action: str, reason: str):
     ids_str = ", ".join(map(str, selected_ids))
     current_user = "MOCK_USER"
@@ -112,26 +146,23 @@ def execute_action(selected_ids: list, action: str, reason: str):
     elif action == "REJECT":
         st.error(f"❌ 差し戻し完了。レコードID {ids_str} が候補テーブルから削除されました。(模擬)")
     
-    # data_editorの状態をリセット
     if 'data_editor_state' in st.session_state:
         del st.session_state['data_editor_state']
     
-    # キャッシュをクリアしてデータを再ロードさせる（承認済みを消すため）
     get_mock_data.clear() 
     st.rerun() 
 
 
 # === アプリケーションの UI メイン関数 ===
 def master_approval_app():
-    st.title("マスタ変更レビュー (縦型比較 & 差分ハイライト)")
+    st.title("マスタ変更レビュー (サマリー & グループ化対応)")
     st.markdown("---")
 
     # 1. データの準備
     df_merged = get_mock_data()
-    # 必須の列が存在することを前提とする
     df_review = df_merged[df_merged['requires_review_cand'] == True]
 
-    # 【初期化】 selected_record_id と detail_select_id のみ初期化
+    # 【初期化】
     if 'selected_record_id' not in st.session_state:
         st.session_state['selected_record_id'] = None
     if 'detail_select_id' not in st.session_state:
@@ -142,68 +173,60 @@ def master_approval_app():
         st.session_state['selected_record_id'] = None 
         return
 
+    # 【新規レコードと既存レコードへの分割】
+    # Prod側のIDがNaNのレコードは新規と判断
+    df_new = df_review[df_review['product_name_prod'].isna()].copy()
+    df_existing = df_review[df_review['product_name_prod'].notna()].copy()
+
     # 変更列数の集計
-    df_summary = df_review[['id']].copy()
-    df_summary['変更列数'] = df_review.filter(like='_changed').sum(axis=1)
+    for df in [df_new, df_existing]:
+         df['変更列数'] = df.filter(like='_changed').sum(axis=1)
+
 
     # UIを左右に分割
     col_list, col_detail = st.columns([1, 1.5]) 
     
     # ---------------------------
-    # 【左カラム: フィルタと一覧】
+    # 【左カラム: フィルタと一覧 (タブ化)】
     # ---------------------------
     with col_list:
         st.subheader("承認待ちレコード一覧")
-        
-        # 1. フィルタリングUIの配置
-        st.markdown("##### 絞り込み条件")
-        
-        max_changes = df_summary['変更列数'].max()
-        min_changes = st.slider(
-            '変更列数がこれ以上のレコードを表示',
-            min_value=0, 
-            max_value=max_changes if max_changes > 0 else 0,
-            value=0,
-            key='change_filter_slider' 
-        )
-        
-        df_filtered = df_summary[df_summary['変更列数'] >= min_changes].reset_index(drop=True)
-        
-        if df_filtered.empty:
-            st.info("フィルタ条件を満たすレコードはありません。")
-            available_ids = []
-            selected_ids_for_action = []
+
+        tab_new, tab_existing = st.tabs([f"新規レコード ({len(df_new)})", f"既存レコード変更 ({len(df_existing)})"])
+
+        # 初期選択のリストを決定 (優先度: 既存 > 新規)
+        if len(df_existing) > 0:
+            current_df_review = df_existing
+            selected_tab_key = tab_existing
+        elif len(df_new) > 0:
+            current_df_review = df_new
+            selected_tab_key = tab_new
         else:
-            available_ids = df_filtered['id'].tolist()
-            
-            st.markdown("---")
-                
-            # 2. データエディタでの一覧表示と選択
-            df_filtered['select'] = False 
-            
-            edited_df = st.data_editor(
-                df_filtered,
-                column_config={
-                    "select": st.column_config.CheckboxColumn(
-                        "アクション対象",
-                        help="承認/差し戻しのアクション対象としてマーク",
-                        default=False
-                    ),
-                    "変更列数": st.column_config.NumberColumn("変更列数")
-                },
-                disabled=("id", "変更列数"), 
-                hide_index=True,
-                use_container_width=True,
-                # data_editor の key は Streamlit に型を任せる
-                key='data_editor_state' 
-            )
+            # ありえないが、念のため
+            st.info("レビュー対象レコードがありません。")
+            return
 
-            selected_ids_for_action = edited_df[edited_df.select]['id'].tolist()
-            
-            st.info(f"現在、**{len(selected_ids_for_action)}** 件のレコードが選択されています。")
-            st.markdown("---")
+        with tab_new:
+            if len(df_new) > 0:
+                st.caption("新しいマスタレコードの登録を確認してください。")
+            # フィルタリング/データエディタはタブ内で実行
+            if selected_tab_key == tab_new:
+                df_filtered, selected_ids_for_action, available_ids = render_review_list(df_new, 'new_record')
+            else:
+                pass # 別のタブが選択されている場合は描画しない
+        
+        with tab_existing:
+            if len(df_existing) > 0:
+                st.caption("既存レコードに対する変更点を確認してください。")
+            # フィルタリング/データエディタはタブ内で実行
+            if selected_tab_key == tab_existing:
+                df_filtered, selected_ids_for_action, available_ids = render_review_list(df_existing, 'existing_record')
+            else:
+                 pass # 別のタブが選択されている場合は描画しない
 
-            # 3. 単一レコードの縦型比較ビュー用IDの選択
+        # 3. 単一レコードの縦型比較ビュー用IDの選択
+        
+        if available_ids:
             
             default_id = available_ids[0]
             default_index = 0
@@ -219,23 +242,29 @@ def master_approval_app():
                 key='detail_select_id',
             )
             st.session_state['selected_record_id'] = detail_review_id
+        else:
+            st.session_state['selected_record_id'] = None
                 
     # ---------------------------
     # 【右カラム: 縦型比較とアクション実行】
     # ---------------------------
     with col_detail:
-        # 選択IDが有効で、かつ現在のフィルタリストに存在する場合にのみ描画
         is_id_available = st.session_state['selected_record_id'] is not None and st.session_state['selected_record_id'] in available_ids
         
         if is_id_available:
             
-            st.subheader(f"ID: {st.session_state['selected_record_id']} の変更点レビュー")
-            
             selected_row_id = st.session_state['selected_record_id']
             # df_review（元の全レビュー対象）から行を抽出
-            selected_row = df_review[df_review['id'] == selected_row_id].iloc[0]
+            selected_row = df_merged[df_merged['id'] == selected_row_id].iloc[0]
             
+            st.subheader(f"ID: {selected_row_id} の変更点レビュー")
+
+            # 【新機能: 変更サマリーの表示】
+            summary_text = create_vertical_summary(selected_row)
+            st.info(summary_text)
+
             # 縦型比較データフレームを作成し表示
+            st.markdown("##### 項目別 差分詳細")
             st.dataframe(
                 create_vertical_diff(selected_row),
                 use_container_width=True,
@@ -247,8 +276,7 @@ def master_approval_app():
             # 4. アクションエリア (一括承認)
             st.subheader("一括承認/差し戻し")
             
-            # ローカル変数 selected_ids_for_action の存在チェックを追加
-            if 'selected_ids_for_action' not in locals() or not selected_ids_for_action:
+            if not selected_ids_for_action:
                 st.warning("アクション対象としてレコードが一つも選択されていません。")
             else:
                 col_btn_app, col_btn_rej = st.columns(2)
@@ -264,6 +292,49 @@ def master_approval_app():
                     execute_action(selected_ids_for_action, action, reason)
         else:
             st.info("左側のリストでレコードを選択するか、フィルタ条件を変更してください。")
+
+# === リスト描画補助関数 ===
+def render_review_list(df_data, group_key):
+    """フィルタリングとdata_editorの描画を担う補助関数"""
+
+    st.markdown("##### 絞り込み条件")
+    max_changes = df_data['変更列数'].max()
+    
+    # フィルタリングUIはタブごとにキーを変える
+    min_changes = st.slider(
+        '変更列数がこれ以上のレコードを表示',
+        min_value=0, 
+        max_value=max_changes if max_changes > 0 else 0,
+        value=0,
+        key=f'change_filter_slider_{group_key}' 
+    )
+    
+    df_filtered = df_data[df_data['変更列数'] >= min_changes].reset_index(drop=True)
+    
+    if df_filtered.empty:
+        st.info("フィルタ条件を満たすレコードはありません。")
+        return pd.DataFrame(), [], []
+        
+    st.markdown("---")
+
+    df_filtered['select'] = False 
+    
+    edited_df = st.data_editor(
+        df_filtered,
+        column_config={
+            "select": st.column_config.CheckboxColumn("アクション対象", default=False),
+            "変更列数": st.column_config.NumberColumn("変更列数")
+        },
+        disabled=("id", "変更列数"), 
+        hide_index=True,
+        use_container_width=True,
+        key=f'data_editor_state_{group_key}' 
+    )
+
+    selected_ids_for_action = edited_df[edited_df.select]['id'].tolist()
+    available_ids = df_filtered['id'].tolist()
+    
+    return df_filtered, selected_ids_for_action, available_ids
 
 
 # === アプリケーション実行 ===
