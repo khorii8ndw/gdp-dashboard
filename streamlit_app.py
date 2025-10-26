@@ -8,7 +8,7 @@ import numpy as np
 CANDIDATE_TBL = "candidate_master_tbl"
 HISTORY_TBL = "approval_history_tbl"
 
-# === モックデータの準備 ===
+# === モックデータの準備 (再修正版: 比較ロジック強化) ===
 def get_mock_data():
     """本番データと承認候補データを模擬"""
     
@@ -47,17 +47,31 @@ def get_mock_data():
     # 変更フラグの列を作成
     for col in review_cols:
         if col != 'id':
-            # NaNをFalseとして扱い、変更を比較
-            change_flag = (df_merged[f'{col}_cand'].fillna('') != df_merged[f'{col}_prod'].fillna(''))
             
-            # 新規レコードの場合 (Prod側がNaN) も変更フラグを立てる
-            is_new_record = df_merged[f'{col}_prod'].isna()
+            col_cand = f'{col}_cand'
+            col_prod = f'{col}_prod'
+            col_changed = f'{col}_changed'
             
-            df_merged[f'{col}_changed'] = change_flag | is_new_record
+            # 【修正点】比較のために、両方の列を文字列に変換してから NaN を '$$NONE$$' という特殊な文字列で埋める
+            # これにより、型ミスマッチと NaN/None の扱いの両方を安全にする
+            s_cand_str = df_merged[col_cand].astype(str).fillna('$$NONE$$')
+            s_prod_str = df_merged[col_prod].astype(str).fillna('$$NONE$$')
+
+            # 値が変更されたかどうかのブーリアン列
+            df_merged[col_changed] = (s_cand_str != s_prod_str)
+            
+            # 【新規レコードの特別な扱い】
+            # prod_str が '$$NONE$$' であり、かつ cand_str が '$$NONE$$' ではない場合、それは新規レコード（変更あり）
+            is_new_record = (s_prod_str == '$$NONE$$') & (s_cand_str != '$$NONE$$')
+            
+            # 変更フラグに新規レコードを統合
+            df_merged[col_changed] = df_merged[col_changed] | is_new_record
+
 
     return df_merged
 
 # === 補助関数：縦型比較データの作成 ===
+# （この関数は、外部からアクセスされるため、以前の安全なロジックを維持）
 def create_vertical_diff(df_row: pd.Series):
     """選択された1レコードを縦型比較のためのDataFrameに変換"""
     data = []
@@ -74,7 +88,7 @@ def create_vertical_diff(df_row: pd.Series):
             prod_value = df_row.get(col_prod, np.nan) 
             is_changed = df_row.get(col_changed, False)
             
-            # Production の値が NaN の場合（新規レコード）は「新規」と表示
+            # Production の値が NaN の場合（新規レコード）は「N/A (新規レコード)」と表示
             if pd.isna(prod_value):
                  prod_display = 'N/A (新規レコード)'
             else:
@@ -110,17 +124,14 @@ def execute_action(selected_ids: list, action: str, reason: str):
     
     try:
         if action == "APPROVE":
-            # 1. 本番マスタへのマージ（模擬）
             st.code(f"[処理模擬] MERGE INTO PRODUCTION_TBL WHERE id IN ({ids_str})")
             st.code(f"INSERT INTO {HISTORY_TBL} VALUES ('{datetime.now().isoformat()}', '{current_user}', 'APPROVED', [{ids_str}], NULL)")
             st.success(f"✅ 承認完了。レコードID {ids_str} が本番に展開されました。")
         elif action == "REJECT":
-            # 1. 候補テーブルからの削除（模擬）
             st.code(f"DELETE FROM CANDIDATE_TBL WHERE id IN ({ids_str})")
             st.code(f"INSERT INTO {HISTORY_TBL} VALUES ('{datetime.now().isoformat()}', '{current_user}', 'REJECTED', [{ids_str}], '{reason}')")
             st.error(f"❌ 差し戻し完了。レコードID {ids_str} が候補テーブルから削除されました。")
         
-        # 処理成功後、画面を再描画し承認済みレコードを消す
         st.rerun() 
 
     except Exception as e:
@@ -188,9 +199,9 @@ def master_approval_app():
         # 2. データエディタでの一覧表示と選択
         
         # 'select' 列を追加し、全てのレコードをデフォルトで未チェックにする
+        # Streamlitのdata_editorの挙動として、編集されていない行はセッションに残らないため、この方法を取る
         df_filtered['select'] = False 
         
-        # data_editorで選択状態を保持
         edited_df = st.data_editor(
             df_filtered,
             column_config={
@@ -216,17 +227,22 @@ def master_approval_app():
         # 3. 単一レコードの縦型比較ビュー用IDの選択
         
         # 詳細レビュー用IDの選択ロジック
-        if selected_ids_for_action:
-            # アクション対象から、一つをサンプルとして詳細レビュー用に選択
-            detail_review_id = st.selectbox(
-                "詳細レビューするレコードを選択:",
-                selected_ids_for_action,
-                key='detail_select_id',
-            )
+        available_ids = df_filtered['id'].tolist()
+        
+        # 前回選択したIDがリストから消えていたら、リストの最初のIDをデフォルトにする
+        if st.session_state.selected_record_id not in available_ids:
+            default_index = 0
+            st.session_state.selected_record_id = available_ids[0]
         else:
-            # アクション対象がゼロの場合、フィルタされたリストの最初のIDを選択
-            detail_review_id = df_filtered['id'].iloc[0]
+            default_index = available_ids.index(st.session_state.selected_record_id)
 
+        detail_review_id = st.selectbox(
+            "詳細レビューするレコードを選択:",
+            available_ids,
+            index=default_index,
+            key='detail_select_id',
+        )
+        
         # 選択IDをセッションに保存
         st.session_state['selected_record_id'] = detail_review_id
 
@@ -239,13 +255,14 @@ def master_approval_app():
             
             # 選択された行を抽出
             selected_row_id = st.session_state['selected_record_id']
+            # df_review（元の全レビュー対象）から行を抽出
             selected_row = df_review[df_review['id'] == selected_row_id].iloc[0]
             
             # 縦型比較データフレームを作成し表示
             st.dataframe(
                 create_vertical_diff(selected_row),
                 use_container_width=True,
-                height=300 # 画面の高さを調整
+                height=300 
             )
 
             st.markdown("---")
@@ -253,7 +270,6 @@ def master_approval_app():
             # 4. アクションエリア (一括承認)
             st.subheader("一括承認/差し戻し")
             
-            # アクションは選択されたIDリストに対して実行される
             if not selected_ids_for_action:
                 st.warning("アクション対象としてレコードが一つも選択されていません。")
             else:
@@ -267,7 +283,6 @@ def master_approval_app():
 
                 if approve_button or reject_button:
                     action = "APPROVE" if approve_button else "REJECT"
-                    # アクションはリストに対して実行される
                     execute_action(selected_ids_for_action, action, reason)
 
 
