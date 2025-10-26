@@ -12,12 +12,11 @@ CANDIDATE_TBL = "candidate_master_tbl"
 HISTORY_TBL = "approval_history_tbl"
 
 # === データの初期化/モックデータの準備 ===
-# @st.cache_data を使用して、データ読み込みをキャッシュし、パフォーマンスと安定性を向上
 @st.cache_data
 def get_mock_data():
     """本番データと承認候補データを模擬"""
     
-    # DataFrameの作成 (データ型の安定化のため、全て明示的に定義)
+    # 横に長いマスタを模擬 (10列)
     data_production = {
         'id': [1, 2, 3, 4],
         'product_name': ["Alpha Widget", "Beta Gadget", "Gamma Thing", "Delta Plate"],
@@ -27,9 +26,12 @@ def get_mock_data():
         'status': ['ACTIVE', 'ACTIVE', 'ACTIVE', 'ACTIVE'],
         'tax_code': ['A-10', 'A-10', 'A-10', 'B-20'],
         'created_date': [datetime(2023, 1, 1), datetime(2023, 5, 10), datetime(2024, 1, 1), datetime(2024, 7, 1)],
+        # 【修正点 1】prod側にもrequires_review列を追加し、merge後の列名を確実に _prod にする
+        'requires_review': [False, False, False, False]
     }
     df_prod = pd.DataFrame(data_production)
 
+    # 承認候補データ (変更点を含む)
     data_candidate = {
         'id': [1, 3, 4, 101, 102],
         'product_name': ["Alpha Widget", "Gamma Thing (Changed)", "Delta Plate", "New Item-X", "New Item-Y"], 
@@ -39,11 +41,12 @@ def get_mock_data():
         'status': ['ACTIVE', 'DEPRECATED', 'ACTIVE', 'ACTIVE', 'ACTIVE'],
         'tax_code': ['A-10', 'A-10', 'B-20', 'C-30', 'A-10'],
         'created_date': [datetime(2023, 1, 1), datetime(2024, 1, 1), datetime(2024, 7, 1), datetime.now(), datetime.now()],
-        'requires_review': [True, True, True, True, True]
+        'requires_review': [True, True, True, True, True] # レビュー対象フラグ
     }
     df_cand = pd.DataFrame(data_candidate)
     
     review_cols = df_cand.columns.tolist()[:-1] 
+    # 【修正点 2】requires_review列を含むデータフレームでマージを実行
     df_merged = df_cand.merge(df_prod, on='id', how='left', suffixes=('_cand', '_prod'))
     
     # 変更フラグの列を作成
@@ -67,7 +70,7 @@ def create_vertical_diff(df_row: pd.Series):
     all_cols = set(df_row.index) 
     
     for col in all_cols:
-        if col.endswith('_cand'):
+        if col.endswith('_cand') and col != 'requires_review_cand':
             base_col = col.replace('_cand', '')
             
             col_prod = col.replace('_cand', '_prod')
@@ -113,7 +116,6 @@ def execute_action(selected_ids: list, action: str, reason: str):
     elif action == "REJECT":
         st.error(f"❌ 差し戻し完了。レコードID {ids_str} が候補テーブルから削除されました。(模擬)")
     
-    # 処理後、data_editorの状態をリセットするため、セッションキーを削除してrerun
     if 'data_editor_state' in st.session_state:
         del st.session_state['data_editor_state']
     st.rerun() 
@@ -126,9 +128,10 @@ def master_approval_app():
 
     # 1. データの準備
     df_merged = get_mock_data()
+    # requires_review_cand の値が True のレコードのみをレビュー対象とする
     df_review = df_merged[df_merged['requires_review_cand'] == True]
 
-    # 【初期化の強化】
+    # 【初期化】
     if 'selected_record_id' not in st.session_state:
         st.session_state['selected_record_id'] = None
     if 'detail_select_id' not in st.session_state:
@@ -162,7 +165,7 @@ def master_approval_app():
         min_changes = st.slider(
             '変更列数がこれ以上のレコードを表示',
             min_value=0, 
-            max_value=max_changes if max_changes > 0 else 0, # max_changesが0の場合を考慮
+            max_value=max_changes if max_changes > 0 else 0,
             value=0,
             key='change_filter_slider' 
         )
@@ -171,15 +174,14 @@ def master_approval_app():
         
         if df_filtered.empty:
             st.info("フィルタ条件を満たすレコードはありません。")
-            # このブロック内で処理を終了せず、次のUI描画に進める
             available_ids = []
+            selected_ids_for_action = []
         else:
             available_ids = df_filtered['id'].tolist()
             
             st.markdown("---")
                 
             # 2. データエディタでの一覧表示と選択
-            
             df_filtered['select'] = False 
             
             edited_df = st.data_editor(
@@ -198,7 +200,6 @@ def master_approval_app():
                 key='data_editor_state'
             )
 
-            # ユーザーがチェックを入れたレコードのIDを取得 (一括承認用)
             selected_ids_for_action = edited_df[edited_df.select]['id'].tolist()
             
             st.info(f"現在、**{len(selected_ids_for_action)}** 件のレコードが選択されています。")
@@ -206,35 +207,26 @@ def master_approval_app():
 
             # 3. 単一レコードの縦型比較ビュー用IDの選択
             
-            # **【修正ロジックの核】** available_ids が空でない場合にのみ selectbox を描画
-            if available_ids:
-                
-                # デフォルト選択のロジック
-                default_id = available_ids[0]
-                default_index = 0
-                
-                if st.session_state.selected_record_id in available_ids:
-                    # 以前の選択IDが現在のリストに存在する場合
-                    default_index = available_ids.index(st.session_state.selected_record_id)
-                    default_id = st.session_state.selected_record_id
-                
-                # st.selectbox
-                detail_review_id = st.selectbox(
-                    "詳細レビューするレコードを選択:",
-                    available_ids,
-                    index=default_index,
-                    key='detail_select_id',
-                )
-                st.session_state['selected_record_id'] = detail_review_id
-            else:
-                st.session_state['selected_record_id'] = None
+            default_id = available_ids[0]
+            default_index = 0
+            
+            if st.session_state.selected_record_id in available_ids:
+                default_index = available_ids.index(st.session_state.selected_record_id)
+                default_id = st.session_state.selected_record_id
+
+            detail_review_id = st.selectbox(
+                "詳細レビューするレコードを選択:",
+                available_ids,
+                index=default_index,
+                key='detail_select_id',
+            )
+            st.session_state['selected_record_id'] = detail_review_id
                 
     # ---------------------------
     # 【右カラム: 縦型比較とアクション実行】
     # ---------------------------
     with col_detail:
-        # **【修正ロジックの核】** 選択IDが有効な場合にのみ描画
-        if st.session_state['selected_record_id'] is not None:
+        if st.session_state['selected_record_id'] is not None and st.session_state['selected_record_id'] in available_ids:
             
             st.subheader(f"ID: {st.session_state['selected_record_id']} の変更点レビュー")
             
@@ -254,7 +246,7 @@ def master_approval_app():
             # 4. アクションエリア (一括承認)
             st.subheader("一括承認/差し戻し")
             
-            if 'selected_ids_for_action' not in locals() or not selected_ids_for_action:
+            if not selected_ids_for_action:
                 st.warning("アクション対象としてレコードが一つも選択されていません。")
             else:
                 col_btn_app, col_btn_rej = st.columns(2)
