@@ -123,11 +123,13 @@ def execute_action(selected_ids: list, action: str, reason: str, available_ids: 
     elif action == "REJECT":
         st.error(f"❌ 差し戻し完了。レコードID {selected_ids} が候補テーブルから削除されました。(模擬)")
     
+    # 1. セッション状態のIDリストから処理済みIDを削除
     if 'all_review_ids' in st.session_state:
         st.session_state['all_review_ids'] = [
             id_val for id_val in st.session_state['all_review_ids'] if id_val not in selected_ids
         ]
     
+    # 2. 次のレコードIDを決定し、セッションにセット
     new_available_ids = [id_val for id_val in available_ids if id_val not in selected_ids]
     
     if not new_available_ids:
@@ -146,6 +148,7 @@ def execute_action(selected_ids: list, action: str, reason: str, available_ids: 
         elif new_available_ids:
             st.session_state['selected_record_id'] = new_available_ids[0]
 
+    # 3. data_editorの状態をリセット
     if 'data_editor_state_existing' in st.session_state:
         del st.session_state['data_editor_state_existing']
     if 'data_editor_state_new' in st.session_state:
@@ -153,38 +156,9 @@ def execute_action(selected_ids: list, action: str, reason: str, available_ids: 
 
     st.rerun() 
 
-# === data_editorのボタンが押された時のコールバック関数 (最終修正版) ===
-# ButtonColumnが on_click で、argsの後に **行インデックス** を自動的に渡します。
-def handle_single_action(action: str, index: int):
-    """
-    ButtonColumnのon_clickから呼ばれる。
-    action: ButtonColumnのargsで渡されたアクション種別 ('APPROVE' or 'REJECT')
-    index: ButtonColumnが自動的に渡す、フィルタリング後のDataFrameにおける行インデックス
-    """
-    
-    group_key = st.session_state['selected_group']
-    df_review = st.session_state.get(f'df_filtered_{group_key}')
-    
-    if df_review is None:
-        return 
-
-    if 0 <= index < len(df_review):
-        
-        # フィルタリング後のDFから直接IDを取得
-        triggered_id = df_review.iloc[index]['id']
-        
-        # 現在の全レビューIDリスト、処理対象IDリストを取得
-        available_ids = st.session_state.get('current_available_ids', []) 
-        current_id = st.session_state.get('selected_record_id')
-
-        # アクション実行に移る
-        execute_action([triggered_id], action, st.session_state.get('reason_area', '理由なし'), available_ids, current_id)
-    
-
-
-# === リスト描画補助関数 (アクションボタン列の追加とデータ保存) ===
+# === リスト描画補助関数 (ボタンを削除し、チェックボックス選別のみに特化) ===
 def render_review_list(df_data, group_key):
-    """フィルタリング、data_editor、アクションボタン列の描画を担う補助関数"""
+    """フィルタリング、data_editorの描画を担う補助関数"""
 
     st.markdown("##### 絞り込み条件")
     max_changes = df_data['変更列数'].max()
@@ -204,27 +178,20 @@ def render_review_list(df_data, group_key):
         return pd.DataFrame(), [], []
         
     st.markdown("---")
-    
-    # コールバック処理のために、フィルタリング後のDFをセッションに一時保存
-    st.session_state[f'df_filtered_{group_key}'] = df_filtered.copy()
 
-    # アクションボタンの列を追加
+    # アクションのためのチェックボックス列を追加
     df_filtered['select'] = False 
-    df_filtered['承認'] = '承認' # ButtonColumn用
-    df_filtered['差し戻し'] = '差し戻し' # ButtonColumn用
     
     edited_df = st.data_editor(
         df_filtered,
         column_config={
-            "select": st.column_config.CheckboxColumn("一括対象", default=False),
+            "select": st.column_config.CheckboxColumn("一括対象", default=False, help="一括アクションの対象として選択"),
             "変更列数": st.column_config.NumberColumn("変更列数", width='small'),
-            # 【最終修正点】on_clickに handle_single_action を直接渡し、argsでアクション種別を指定
-            "承認": st.column_config.ButtonColumn("個別承認", help="このレコードのみを承認します", width='small', on_click=handle_single_action, args=['APPROVE']),
-            "差し戻し": st.column_config.ButtonColumn("個別差し戻し", help="このレコードのみを差し戻します", width='small', on_click=handle_single_action, args=['REJECT'])
         },
         disabled=("id", "変更列数"), 
         hide_index=True,
         use_container_width=True,
+        # selection_mode="single-row", # 単一選択モードで、クリックで詳細が切り替わるようにする
         key=f'data_editor_state_{group_key}' 
     )
 
@@ -236,7 +203,7 @@ def render_review_list(df_data, group_key):
 
 # === アプリケーションの UI メイン関数 ===
 def master_approval_app():
-    st.title("マスタ変更レビュー (アクション集約・最終版)")
+    st.title("マスタ変更レビュー (安定版 - チェックボックス選別)")
     st.markdown("---")
 
     # 1. データとセッション状態の初期化
@@ -262,7 +229,7 @@ def master_approval_app():
     col_list, col_detail = st.columns([1, 1.5]) 
     
     # ---------------------------
-    # 【左カラム: フィルタと一覧 (グルーピング) - 選別とアクションの集中】
+    # 【左カラム: フィルタと一覧 (選別) - スクロールとチェックに集中】
     # ---------------------------
     with col_list:
         st.subheader("承認待ちレコード一覧")
@@ -291,7 +258,7 @@ def master_approval_app():
         
         st.session_state['current_available_ids'] = available_ids 
 
-        # 5. 詳細レビューIDの決定と単体アクションのトリガー
+        # 5. 詳細レビューIDの決定 (クリックした行を詳細ビューに反映)
         if available_ids:
             
             if st.session_state.selected_record_id not in available_ids:
@@ -311,7 +278,7 @@ def master_approval_app():
             st.session_state['selected_record_id'] = None
                 
     # ---------------------------
-    # 【右カラム: 純粋な詳細確認ビュー】
+    # 【右カラム: 純粋な詳細確認ビューと一括アクション】
     # ---------------------------
     with col_detail:
         is_id_available = st.session_state['selected_record_id'] is not None and st.session_state['selected_record_id'] in df_active_review['id'].tolist()
@@ -322,7 +289,7 @@ def master_approval_app():
             selected_row = df_merged[df_merged['id'] == current_id].iloc[0]
             
             st.subheader(f"ID: {current_id} の変更点レビュー (確認用)")
-            st.markdown(f"左側のリストの行を**クリック**すると、詳細が切り替わります。**アクションは左側の一覧で行えます**。")
+            st.markdown(f"左側のリストの行を**クリック**すると、詳細が切り替わります。")
 
             summary_text = create_vertical_summary(selected_row)
             st.info(summary_text)
@@ -336,7 +303,7 @@ def master_approval_app():
 
             st.markdown("---")
             
-            # 2. 一括承認/差し戻しエリア
+            # 2. 一括承認/差し戻しエリア (選別したレコードに対して最後に実行)
             st.subheader("一括アクション (左側でチェックしたレコード)")
 
             if not selected_ids_for_action:
