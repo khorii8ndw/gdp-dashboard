@@ -62,7 +62,6 @@ def load_all_mock_data():
 
 # === 補助関数 (変更なし) ===
 def create_vertical_summary(df_row: pd.Series):
-    # ... (ロジックは変更なし) ...
     is_new_record = pd.isna(df_row.get('product_name_prod', np.nan)) 
     if is_new_record:
         return f"**新規レコード**が登録されようとしています。これは完全に新しいマスタエントリです。"
@@ -85,7 +84,6 @@ def create_vertical_summary(df_row: pd.Series):
         return "このレコードには明らかな変更点はありません。(エラーの可能性)"
 
 def create_vertical_diff(df_row: pd.Series):
-    # ... (ロジックは変更なし) ...
     data = []
     all_cols = set(df_row.index) 
     for col in all_cols:
@@ -116,7 +114,6 @@ def create_vertical_diff(df_row: pd.Series):
         return diff_df.style.apply(style_diff, axis=1) 
 
 def execute_action(selected_ids: list, action: str, reason: str, available_ids: list, current_id: int):
-    # ... (ロジックは変更なし) ...
     
     st.info(f"合計 {len(selected_ids)} 件のレコードに対してアクション実行中... ({action})")
     time.sleep(0.5)
@@ -156,54 +153,33 @@ def execute_action(selected_ids: list, action: str, reason: str, available_ids: 
 
     st.rerun() 
 
-# === 新規追加: コールバック処理をセッションに中継するラッパー関数 ===
-def set_action_type(action: str):
-    """ButtonColumnのon_clickから呼ばれ、実行するアクションをセッションに保存する"""
-    st.session_state['triggered_action'] = action
-    # ButtonColumnは行インデックスも自動で引数に渡すが、ここでは無視する
-
-
 # === data_editorのボタンが押された時のコールバック関数 (最終修正版) ===
-# ButtonColumnは on_click で、argsの後に **行インデックス** を自動的に渡します。
-# しかし、今回は ButtonColumn の引数から args を削除したため、自動で渡される引数はありません。
-# 代わりに、data_editor の編集履歴からどの行が押されたかを特定します。
-def handle_single_action():
-    """ButtonColumnのon_clickから呼ばれる。アクション種別はセッションから取得する。"""
+# ButtonColumnが on_click で、argsの後に **行インデックス** を自動的に渡します。
+def handle_single_action(action: str, index: int):
+    """
+    ButtonColumnのon_clickから呼ばれる。
+    action: ButtonColumnのargsで渡されたアクション種別 ('APPROVE' or 'REJECT')
+    index: ButtonColumnが自動的に渡す、フィルタリング後のDataFrameにおける行インデックス
+    """
     
-    action = st.session_state.get('triggered_action')
     group_key = st.session_state['selected_group']
-    editor_key = f'data_editor_state_{group_key}'
     df_review = st.session_state.get(f'df_filtered_{group_key}')
     
-    if action is None or df_review is None:
-        return # 必要な情報がないため何もしない
+    if df_review is None:
+        return 
 
-    if editor_key in st.session_state and st.session_state[editor_key].get('edited_rows'):
+    if 0 <= index < len(df_review):
         
-        edited_rows = st.session_state[editor_key]['edited_rows']
+        # フィルタリング後のDFから直接IDを取得
+        triggered_id = df_review.iloc[index]['id']
         
-        # 最後に編集された行（ボタンが押された行）のインデックスを見つける
-        triggered_index = -1
-        # ButtonColumnが押されたとき、その列名に対応するedited_rowsに何らかの値がセットされる
-        action_col = '承認' if action == 'APPROVE' else '差し戻し'
-        
-        for idx, row_dict in edited_rows.items():
-            if action_col in row_dict:
-                triggered_index = idx
-                break
-        
-        if triggered_index != -1 and 0 <= triggered_index < len(df_review):
-            triggered_id = df_review.iloc[triggered_index]['id']
-            
-            # 現在の全レビューIDリスト、処理対象IDリストを取得
-            available_ids = st.session_state.get('current_available_ids', []) 
-            current_id = st.session_state.get('selected_record_id')
+        # 現在の全レビューIDリスト、処理対象IDリストを取得
+        available_ids = st.session_state.get('current_available_ids', []) 
+        current_id = st.session_state.get('selected_record_id')
 
-            # アクション実行に移る
-            execute_action([triggered_id], action, st.session_state.get('reason_area', '理由なし'), available_ids, current_id)
-        
-        # 処理が終わったらアクション種別をクリア
-        del st.session_state['triggered_action']
+        # アクション実行に移る
+        execute_action([triggered_id], action, st.session_state.get('reason_area', '理由なし'), available_ids, current_id)
+    
 
 
 # === リスト描画補助関数 (アクションボタン列の追加とデータ保存) ===
@@ -242,15 +218,13 @@ def render_review_list(df_data, group_key):
         column_config={
             "select": st.column_config.CheckboxColumn("一括対象", default=False),
             "変更列数": st.column_config.NumberColumn("変更列数", width='small'),
-            # 【最終修正点】on_clickに引数を渡さないラッパー関数を使用し、handle_single_actionを実行
-            "承認": st.column_config.ButtonColumn("個別承認", help="このレコードのみを承認します", width='small', on_click=lambda: set_action_type('APPROVE')),
-            "差し戻し": st.column_config.ButtonColumn("個別差し戻し", help="このレコードのみを差し戻します", width='small', on_click=lambda: set_action_type('REJECT'))
+            # 【最終修正点】on_clickに handle_single_action を直接渡し、argsでアクション種別を指定
+            "承認": st.column_config.ButtonColumn("個別承認", help="このレコードのみを承認します", width='small', on_click=handle_single_action, args=['APPROVE']),
+            "差し戻し": st.column_config.ButtonColumn("個別差し戻し", help="このレコードのみを差し戻します", width='small', on_click=handle_single_action, args=['REJECT'])
         },
         disabled=("id", "変更列数"), 
         hide_index=True,
         use_container_width=True,
-        # on_changeで行の編集が発生したときに handle_single_action を呼び出す
-        on_change=handle_single_action,
         key=f'data_editor_state_{group_key}' 
     )
 
@@ -329,11 +303,9 @@ def master_approval_app():
             
             if selection and selection.get('rows'):
                 selected_row_index = selection['rows'][0]
-                # filtered DFは data_editor と同じ順序なので、ilocでIDを取得
                 new_selected_id = df_filtered.iloc[selected_row_index]['id'] 
                 st.session_state['selected_record_id'] = new_selected_id
             elif available_ids:
-                 # 選択がない場合は、リストの最初を選択IDとする
                  st.session_state['selected_record_id'] = available_ids[0]
         else:
             st.session_state['selected_record_id'] = None
@@ -350,7 +322,7 @@ def master_approval_app():
             selected_row = df_merged[df_merged['id'] == current_id].iloc[0]
             
             st.subheader(f"ID: {current_id} の変更点レビュー (確認用)")
-            st.markdown(f"左側のリストの行を**クリック**すると、詳細が切り替わります。アクションは左側の一覧で行えます。")
+            st.markdown(f"左側のリストの行を**クリック**すると、詳細が切り替わります。**アクションは左側の一覧で行えます**。")
 
             summary_text = create_vertical_summary(selected_row)
             st.info(summary_text)
