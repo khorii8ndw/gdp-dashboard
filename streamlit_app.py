@@ -74,12 +74,12 @@ def load_all_mock_data():
     
     return df_merged
 
-# === 補助関数 (変更なし) ===
+# === 補助関数 1：変更サマリーの自動生成 (変更なし) ===
 def create_vertical_summary(df_row: pd.Series):
     is_new_record = pd.isna(df_row.get('product_name_prod', np.nan)) 
     
     if is_new_record:
-        return f"**新規レコード**が登録されようとしています。"
+        return "**新規レコード**が登録されようとしています。"
         
     changes = []
     for key, is_changed in df_row.filter(like='_changed').items():
@@ -88,18 +88,21 @@ def create_vertical_summary(df_row: pd.Series):
             col_name = base_col.replace('_', ' ').title()
             val_prod = df_row.get(f'{base_col}_prod', 'N/A')
             val_cand = df_row.get(f'{base_col}_cand', 'N/A')
-            if base_col == 'created_date':
-                 changes.append(f"作成日 ({col_name}) が更新されました。")
-            elif pd.isna(val_prod):
-                 changes.append(f"{col_name} が {val_cand} に設定されました。")
+            
+            # 変更内容を簡潔にまとめる
+            if base_col == 'product_name':
+                changes.append(f"品名が変更されました。")
+            elif base_col == 'price':
+                changes.append(f"価格が {val_prod} から {val_cand} に変更されました。")
             else:
-                 changes.append(f"{col_name} が **{val_prod}** から **{val_cand}** に変更されました。")
+                 changes.append(f"{col_name}が変更されました。")
 
     if changes:
-        return "**既存レコードの変更点:** " + " ".join(changes)
+        return " | ".join(changes)
     else:
-        return "このレコードには明らかな変更点はありません。(エラーの可能性)"
+        return "変更なし (レビュー対象外の可能性)"
 
+# === 補助関数 2：縦型比較データの作成 (変更なし) ===
 def create_vertical_diff(df_row: pd.Series):
     data = []
     all_cols = set(df_row.index) 
@@ -137,7 +140,7 @@ def create_vertical_diff(df_row: pd.Series):
     else:
         return diff_df.style.apply(style_diff, axis=1) 
 
-# === 承認ロジックの模擬 (ページ単位で実行) ===
+# === 承認ロジックの模擬 (ページ単位で実行) (変更なし) ===
 def execute_page_action(df_page: pd.DataFrame, bulk_approve_checked: bool, current_page: int, total_pages: int):
     
     processed_ids = []
@@ -145,6 +148,7 @@ def execute_page_action(df_page: pd.DataFrame, bulk_approve_checked: bool, curre
     for index, row in df_page.iterrows():
         record_id = row['id']
         action_key = f'action_{record_id}'
+        comment_key = f'comment_{record_id}'
         
         # 1. ラジオボタンの値を取得 (ユーザーが個別に操作した場合、この値が優先される)
         action_label = st.session_state.get(action_key)
@@ -165,9 +169,12 @@ def execute_page_action(df_page: pd.DataFrame, bulk_approve_checked: bool, curre
             
             processed_ids.append(record_id)
             
-            # 処理後のラジオボタンの状態をクリアして次回描画に備える
+            # 処理後のセッションステートをクリア
             if action_key in st.session_state:
                  del st.session_state[action_key]
+            if comment_key in st.session_state:
+                 # コメントは処理後もログとして保持する可能性があるが、UI表示のためにクリア
+                 del st.session_state[comment_key] 
             
     # 一括承認チェックボックスの状態をクリア (次回描画でチェックが外れるように)
     if 'bulk_set_approve_checkbox' in st.session_state:
@@ -188,8 +195,8 @@ def execute_page_action(df_page: pd.DataFrame, bulk_approve_checked: bool, curre
     st.rerun()
 
 # === アプリケーションの UI メイン関数 ===
-def master_approval_app_v3():
-    st.title("マスタ変更レビュー (縦型スクロールワークスペース)")
+def master_approval_app_v4():
+    st.title("マスタ変更レビュー (表形式スクロールワークスペース)")
 
     # 1. データとセッション状態の初期化
     df_initial_merged = load_all_mock_data()
@@ -264,7 +271,6 @@ def master_approval_app_v3():
     if 'last_filter_records' not in st.session_state or st.session_state['last_filter_records'] != total_records:
         st.session_state['current_page'] = 1
         st.session_state['last_filter_records'] = total_records
-        # フィルタ変更時に一括チェックボックスの状態もリセット
         if 'bulk_set_approve_checkbox' in st.session_state:
              st.session_state['bulk_set_approve_checkbox'] = False
 
@@ -285,7 +291,6 @@ def master_approval_app_v3():
     with col_page_nav:
         
         col_prev, col_next = st.columns(2)
-        # on_click はフォーム外のボタンなのでそのまま使用可能
         with col_prev:
             if st.session_state['current_page'] > 1:
                 st.button("前のページへ", on_click=lambda: st.session_state.update({'current_page': st.session_state['current_page'] - 1}), use_container_width=True)
@@ -296,68 +301,83 @@ def master_approval_app_v3():
     st.markdown("---")
     
     # ---------------------------
-    # 【メインコンテンツ: 縦型レビューフォーム】
+    # 【メインコンテンツ: 表形式レビューフォーム】
     # ---------------------------
 
     # Streamlit Form を使用して、ページ単位で一括送信を可能にする
     with st.form(key=f'review_form_{st.session_state["current_page"]}'):
         
-        # 【★修正箇所】一括チェック機能はチェックボックスに置き換え、フォーム内のキーとして使用
-        st.checkbox(
-            "このページの**「レビュー待ち」**レコードを、**一括で承認**する",
-            value=st.session_state.get('bulk_set_approve_checkbox', False),
-            key='bulk_set_approve_checkbox',
-            help="このチェックボックスをオンにしてフォームを送信すると、個別に「承認」または「差し戻し」が選択されていないレコードは全て「承認」として処理されます。",
-        )
+        # --- ヘッダー行の表示 ---
+        header_cols = st.columns([0.5, 2, 1.5, 2, 2])
+        header_cols[0].markdown("**ID**")
+        header_cols[1].markdown("**変更サマリ**")
+        header_cols[2].markdown("**差分詳細**")
+        header_cols[3].markdown("##### **✅ アクション**")
+        header_cols[4].markdown("##### **📝 コメント**")
         st.markdown("---")
         
-        # 各レコードを縦に表示
+        # 各レコードを縦に表示（各行はst.columnsで構成される）
         for index, row in df_page.iterrows():
             record_id = row['id']
             
             # デフォルトインデックスの決定
-            # ユーザー操作が優先されるため、セッションステートに値があればそれをデコードしてインデックスを設定
             current_label = st.session_state.get(f'action_{record_id}')
             default_index = OPTIONS_JP.index(current_label) if current_label in OPTIONS_JP else OPTIONS_JP.index('レビュー待ち')
-            
-            # 各レコードのコンテナ
-            with st.container(border=True):
-                
-                # タイトルとサマリを横並びに
-                col_id, col_summary = st.columns([1, 3])
-                
-                with col_id:
-                     st.subheader(f"ID: {record_id}")
-                
-                with col_summary:
-                    summary_text = create_vertical_summary(row)
-                    st.info(summary_text)
 
-                # 変更詳細
-                with st.expander("🔍 差分詳細を確認（クリックで開閉）"):
+            # --- レコード行の表示 ---
+            row_cols = st.columns([0.5, 2, 1.5, 2, 2])
+            
+            # 1. ID
+            with row_cols[0]:
+                st.markdown(f"**{record_id}**")
+                
+            # 2. 変更サマリ
+            with row_cols[1]:
+                summary_text = create_vertical_summary(row)
+                st.info(summary_text)
+
+            # 3. 差分詳細 (ボタンとExpander)
+            with row_cols[2]:
+                with st.expander("🔍 詳細を確認"):
                     st.dataframe(
                         create_vertical_diff(row),
                         use_container_width=True,
                         hide_index=True
                     )
-                
-                # OK/NG チェック（ラジオボタン）
-                st.markdown("##### 💡 アクションを選択してください")
-                
+
+            # 4. アクション（OK/NG ラジオボタン）
+            with row_cols[3]:
                 st.radio(
-                    "この変更をどうしますか？",
+                    "アクション",
                     options=OPTIONS_JP,
                     index=default_index, 
                     format_func=lambda x: f"✅ {x}" if x=='承認' else (f"❌ {x}" if x=='差し戻し' else x),
-                    key=f'action_{record_id}', # フォーム送信時にこのキーで値を取得
-                    horizontal=True
+                    key=f'action_{record_id}',
+                    horizontal=True,
+                    label_visibility="collapsed" # ヘッダーがあるため非表示
                 )
             
-            st.divider() # 各レコード間の視覚的な区切り
+            # 5. コメント欄
+            with row_cols[4]:
+                st.text_area(
+                    "コメント",
+                    value=st.session_state.get(f'comment_{record_id}', ""),
+                    key=f'comment_{record_id}',
+                    height=70,
+                    label_visibility="collapsed" # ヘッダーがあるため非表示
+                )
+            
+            st.divider() # レコード間の区切り線
 
-        # フォームの送信ボタン (ページ一括アクション)
-        st.markdown("##### 📝 一括アクションの理由/コメント (オプション)")
-        reason = st.text_area("コメント", key='page_reason')
+        # フォーム下部の一括チェックと送信ボタン
+        
+        st.markdown("---")
+        st.checkbox(
+            "このページの**「レビュー待ち」**レコードを、**一括で承認**する",
+            value=st.session_state.get('bulk_set_approve_checkbox', False),
+            key='bulk_set_approve_checkbox',
+            help="このチェックボックスをオンにしてフォームを送信すると、個別に選択されていないレコードは全て「承認」として処理されます。",
+        )
         
         submitted = st.form_submit_button(
             f"🎉 選択した {len(df_page)} 件を一括申請・実行", 
@@ -375,4 +395,4 @@ def master_approval_app_v3():
 
 # === アプリケーション実行 ===
 if __name__ == "__main__":
-    master_approval_app_v3()
+    master_approval_app_v4()
