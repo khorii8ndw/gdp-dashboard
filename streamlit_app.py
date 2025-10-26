@@ -13,10 +13,10 @@ RECORDS_PER_PAGE = 10 # ページごとの表示件数
 STATUS_OPTIONS = {'レビュー待ち': 'PENDING', '承認': 'APPROVE', '差し戻し': 'REJECT'}
 OPTIONS_JP = list(STATUS_OPTIONS.keys())
 
-# === データの初期化/モックデータの準備 (前回修正済みの安定版を使用) ===
+# === データの初期化/モックデータの準備 (KeyError修正) ===
 @st.cache_data(show_spinner=False)
 def load_all_mock_data():
-    """データロードロジック（エラー修正済み）"""
+    """データロードロジック（KeyError修正）"""
     
     # データを増やすために1〜25番まで追加
     data_production = {
@@ -65,8 +65,8 @@ def load_all_mock_data():
 
         df_merged[col_changed] = (s_cand_str != s_prod_str)
             
-    # レビュー対象のステータスを追跡するためのカラムを追加
-    df_merged['review_status'] = df_merged['requires_review'].apply(
+    # 【★修正箇所】カラム名を 'requires_review_cand' に修正
+    df_merged['review_status'] = df_merged['requires_review_cand'].apply(
         lambda x: STATUS_OPTIONS['レビュー待ち'] if x else STATUS_OPTIONS['承認']
     )
     
@@ -139,7 +139,7 @@ def create_vertical_diff(df_row: pd.Series):
     else:
         return diff_df.style.apply(style_diff, axis=1) 
 
-# === 承認ロジックの模擬 (ページ単位で実行) (軽微な修正) ===
+# === 承認ロジックの模擬 (ページ単位で実行) (変更なし) ===
 def execute_page_action(df_page: pd.DataFrame, submitted_data: dict, current_page: int, total_pages: int):
     
     processed_ids = []
@@ -148,16 +148,12 @@ def execute_page_action(df_page: pd.DataFrame, submitted_data: dict, current_pag
         record_id = row['id']
         action_key = f'action_{record_id}'
         
-        # フォーム送信時にラジオボタンの値がセッションステートにセットされている
         action_label = st.session_state.get(action_key)
         
-        # ラジオボタンで選択されたラベルからコードを取得
-        # ラベルがNone（未選択）の場合はデフォルトの'レビュー待ち'を適用
         action = next((code for label, code in STATUS_OPTIONS.items() if label == action_label), STATUS_OPTIONS['レビュー待ち'])
         
         if action != STATUS_OPTIONS['レビュー待ち']:
             
-            # 1. マスターデータのレビュー状態を更新
             st.session_state['df_merged'].loc[
                 st.session_state['df_merged']['id'] == record_id, 
                 'review_status'
@@ -186,7 +182,7 @@ def execute_page_action(df_page: pd.DataFrame, submitted_data: dict, current_pag
 
     st.rerun()
 
-# === アプリケーションの UI メイン関数 ===
+# === アプリケーションの UI メイン関数 (変更なし) ===
 def master_approval_app_v3():
     st.title("マスタ変更レビュー (縦型スクロールワークスペース)")
 
@@ -296,6 +292,7 @@ def master_approval_app_v3():
 
     # 一括承認ボタンが押された際のコールバック関数
     def set_bulk_approve_callback():
+        # フラグをTrueにするだけで、フォーム内のラジオボタンのデフォルト値が次回描画時に変わる
         st.session_state['bulk_set_approve'] = True
 
     # Streamlit Form を使用して、ページ単位で一括送信を可能にする
@@ -314,8 +311,8 @@ def master_approval_app_v3():
         for index, row in df_page.iterrows():
             record_id = row['id']
             
-            # ページの一括ボタンが押された場合、デフォルト値を '承認' に設定する
-            # そうでない場合は、デフォルト値を 'レビュー待ち' に設定する
+            # ページの一括ボタンが押された場合、デフォルト値を '承認' (Index 0) に設定する
+            # そうでない場合は、デフォルト値を 'レビュー待ち' (Index 2) に設定する
             default_index = 0 if st.session_state['bulk_set_approve'] else 2
             
             # 各レコードのコンテナ
@@ -345,6 +342,9 @@ def master_approval_app_v3():
                 st.radio(
                     "この変更をどうしますか？",
                     options=OPTIONS_JP,
+                    # 注意: ラジオボタンはフォーム外でデフォルトインデックスを設定しても、
+                    # ユーザーが操作するとセッションステートに値が残り、その値が優先される。
+                    # フォーム内の要素なので、フォーム送信時以外はセッションステートを参照させないようにする
                     index=default_index, 
                     format_func=lambda x: f"✅ {x}" if x=='承認' else (f"❌ {x}" if x=='差し戻し' else x),
                     key=f'action_{record_id}', # フォーム送信時にこのキーで値を取得
@@ -364,8 +364,7 @@ def master_approval_app_v3():
         )
 
         if submitted:
-            # フォーム送信時に、st.session_stateに保存されたフォームデータを取得
-            # 提出されたデータはexecute_page_action内でst.session_stateから取得される
+            # execute_page_actionで処理を実行
             execute_page_action(df_page, None, st.session_state['current_page'], total_pages)
 
 
