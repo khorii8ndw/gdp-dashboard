@@ -14,11 +14,9 @@ STATUS_OPTIONS = {'レビュー待ち': 'PENDING', '承認': 'APPROVE', '差し�
 OPTIONS_JP = list(STATUS_OPTIONS.keys())
 
 # === データの初期化/モックデータの準備 ===
-@st.cache_data(show_spinner=False)
 def load_all_mock_data():
     """データロードロジック"""
     
-    # データを増やすために1〜25番まで追加
     data_production = {
         'id': list(range(1, 26)),
         'product_name': [f"Item {i:03d}" for i in range(1, 26)],
@@ -32,7 +30,6 @@ def load_all_mock_data():
     }
     df_prod = pd.DataFrame(data_production)
 
-    # 変更候補データを20件作成
     changed_ids = [1, 5, 10, 15, 20] # 5件
     new_ids = list(range(101, 116))   # 15件
     
@@ -52,7 +49,6 @@ def load_all_mock_data():
     review_cols = [col for col in df_cand.columns if col not in ['id', 'requires_review']]
     df_merged = df_cand.merge(df_prod, on='id', how='left', suffixes=('_cand', '_prod'))
     
-    # 新規レコードかどうかのフラグ
     df_merged['is_new_record'] = df_merged['product_name_prod'].isna()
     
     for col in review_cols:
@@ -69,7 +65,6 @@ def load_all_mock_data():
         lambda x: STATUS_OPTIONS['レビュー待ち'] if x else STATUS_OPTIONS['承認']
     )
     
-    # 日付型を日付のみにする（フィルタのため）
     df_merged['created_date_cand_date'] = pd.to_datetime(df_merged['created_date_cand']).dt.date
     
     return df_merged
@@ -89,7 +84,6 @@ def create_vertical_summary(df_row: pd.Series):
             val_prod = df_row.get(f'{base_col}_prod', 'N/A')
             val_cand = df_row.get(f'{base_col}_cand', 'N/A')
             
-            # 変更内容を簡潔にまとめる
             if base_col == 'product_name':
                 changes.append(f"品名が変更されました。")
             elif base_col == 'price':
@@ -105,7 +99,7 @@ def create_vertical_summary(df_row: pd.Series):
 # === 補助関数 2：縦型比較データの作成（ハイライト対応版） ===
 def create_vertical_diff(df_row: pd.Series):
     data = []
-    # 比較対象の列データをリストに格納
+    
     for col in df_row.index:
         if col.endswith('_cand') and col not in ['requires_review_cand', 'review_status', 'is_new_record', 'created_date_cand_date']:
             base_col = col.replace('_cand', '')
@@ -129,86 +123,76 @@ def create_vertical_diff(df_row: pd.Series):
     
     diff_df = pd.DataFrame(data)
     
-    # スタイルを適用する関数
+    is_changed_list = diff_df['差分あり'].tolist()
+    
     def highlight_changes(s):
-        # '差分あり'列の値（ブール値）を取得
-        is_changed = diff_df['差分あり']
-        
-        # '変更後 (Candidate)'列のみを対象とする
         if s.name == '変更後 (Candidate)':
-            # '差分あり'がTrueの場合にハイライト色を、Falseの場合に空文字列を返す
-            return ['background-color: #ffcccc' if changed else '' for changed in is_changed]
+            return ['background-color: #ffcccc' if changed else '' for changed in is_changed_list]
         
-        # その他の列にはスタイルを適用しない
         return [''] * len(s)
 
-    # st.dataframeに表示するために、不要な '差分あり' 列をドロップし、スタイルを適用
     styled_df = diff_df.drop(columns=['差分あり']).style.apply(highlight_changes, axis=0)
     
     return styled_df
 
 # === 承認ロジックの模擬 (ページ単位で実行) ===
-def execute_page_action(df_page: pd.DataFrame, bulk_approve_checked: bool, current_page: int, total_pages: int):
+def execute_page_action(df_page: pd.DataFrame, bulk_approve_checked: bool):
     
     processed_ids = []
+    
+    # 提案 6: コメントログの初期化
+    if 'comments_log' not in st.session_state:
+        st.session_state['comments_log'] = {}
     
     for index, row in df_page.iterrows():
         record_id = row['id']
         action_key = f'action_{record_id}'
         comment_key = f'comment_{record_id}'
         
-        # 1. ラジオボタンの値を取得 (ユーザーが個別に操作した場合、この値が優先される)
         action_label = st.session_state.get(action_key)
+        comment_text = st.session_state.get(comment_key, '').strip() 
         
-        # 2. 一括承認フラグが立っている場合、ラジオボタンが 'レビュー待ち' のレコードを '承認' に上書き
+        action_to_be_executed = action_label
+        # 一括承認がチェックされており、かつ個別アクションが「レビュー待ち」の場合に上書き
         if bulk_approve_checked and action_label == 'レビュー待ち':
-            action_label = '承認'
+            action_to_be_executed = '承認'
         
-        # ラベルからコードを取得
-        action = next((code for label, code in STATUS_OPTIONS.items() if label == action_label), STATUS_OPTIONS['レビュー待ち'])
+        # コードを取得
+        action = next((code for label, code in STATUS_OPTIONS.items() if label == action_to_be_executed), STATUS_OPTIONS['レビュー待ち'])
         
         if action != STATUS_OPTIONS['レビュー待ち']:
             
+            # 状態更新
             st.session_state['df_merged'].loc[
                 st.session_state['df_merged']['id'] == record_id, 
                 'review_status'
             ] = action
             
+            # 提案 6: コメントログの保存
+            if comment_text or action != STATUS_OPTIONS['レビュー待ち']:
+                 st.session_state['comments_log'][record_id] = {
+                    'comment': comment_text,
+                    'action': action_to_be_executed,
+                    'timestamp': datetime.now()
+                }
+
             processed_ids.append(record_id)
             
-            # 処理後のセッションステートをクリア
-            if action_key in st.session_state:
-                 del st.session_state[action_key]
-            if comment_key in st.session_state:
-                 del st.session_state[comment_key] 
-            
-    # 一括承認チェックボックスの状態をクリア (次回描画でチェックが外れるように)
-    if 'bulk_set_approve_checkbox' in st.session_state:
-        st.session_state['bulk_set_approve_checkbox'] = False
-
     if processed_ids:
-        st.success(f"✅ このページで合計 **{len(processed_ids)} 件** のアクションが実行され、状態が更新されました。")
+        # 提案 3: 成功メッセージを簡潔に
+        st.success(f"✅ {len(processed_ids)}件を処理しました。")
+        return True # 処理成功
     else:
         st.warning("このページで承認または差し戻しのアクションは実行されませんでした。")
-        
-    # 次のページへ自動で移動
-    if current_page < total_pages:
-        st.session_state['current_page'] = current_page + 1
-    else:
-        st.info("全てのページのレビューが完了しました。")
-        st.session_state['current_page'] = 1 # 最初のページに戻す
-
-    st.rerun()
+        return False # 処理失敗
 
 # === アプリケーションの UI メイン関数 ===
-def master_approval_app_v4():
+def master_approval_app_v6():
     st.title("マスタ変更レビュー (表形式スクロールワークスペース)")
 
     # 1. データとセッション状態の初期化
-    df_initial_merged = load_all_mock_data()
-    
     if 'df_merged' not in st.session_state:
-        st.session_state['df_merged'] = df_initial_merged.copy()
+        st.session_state['df_merged'] = load_all_mock_data().copy()
         
     if 'current_page' not in st.session_state:
         st.session_state['current_page'] = 1
@@ -226,9 +210,13 @@ def master_approval_app_v4():
                 key='filter_group_radio'
             )
         
-        # フィルタリング用の日付の最小値/最大値を取得
-        min_date = st.session_state['df_merged']['created_date_cand_date'].min()
-        max_date = st.session_state['df_merged']['created_date_cand_date'].max()
+        # 提案 5: 日付フィルタのエラー回避
+        try:
+            min_date = st.session_state['df_merged']['created_date_cand_date'].min()
+            max_date = st.session_state['df_merged']['created_date_cand_date'].max()
+        except:
+            min_date = max_date = datetime.now().date()
+            
         
         with col_date_start:
             filter_date_start = st.date_input(
@@ -246,45 +234,45 @@ def master_approval_app_v4():
                 max_value=max_date,
                 key='filter_date_end'
             )
+    
+    # フィルタ変更検知とページリセット
+    current_filter = (filter_group, filter_date_start, filter_date_end)
+    if st.session_state.get('last_filter') != current_filter:
+        st.session_state['current_page'] = 1
+        st.session_state['last_filter'] = current_filter
+        st.session_state['selected_detail_id'] = None 
+        keys_to_delete = [k for k in st.session_state.keys() 
+                          if k.startswith('action_') or k.startswith('comment_')]
+        for k in keys_to_delete:
+            del st.session_state[k]
 
     # 2. フィルタの適用
     df_active_review = st.session_state['df_merged'][
         st.session_state['df_merged']['review_status'] == STATUS_OPTIONS['レビュー待ち']
     ].copy()
     
-    # グループフィルタ適用
     if filter_group == '新規レコード':
         df_active_review = df_active_review[df_active_review['is_new_record'] == True]
     elif filter_group == '既存レコード変更':
         df_active_review = df_active_review[df_active_review['is_new_record'] == False]
         
-    # 日付フィルタ適用
     df_active_review = df_active_review[
         (df_active_review['created_date_cand_date'] >= filter_date_start) & 
         (df_active_review['created_date_cand_date'] <= filter_date_end)
     ].sort_values(by='id').reset_index(drop=True)
     
-    # フィルタ後の件数確認
-    if df_active_review.empty:
+    total_records = len(df_active_review)
+    if total_records == 0:
         st.success("🎉 現在のフィルタ条件を満たすレビュー対象レコードはありません。")
         return
 
     # --- ページネーションの計算 ---
-    total_records = len(df_active_review)
     total_pages = math.ceil(total_records / RECORDS_PER_PAGE)
-    
-    # フィルタが変わったらページをリセット
-    if 'last_filter_records' not in st.session_state or st.session_state['last_filter_records'] != total_records:
-        st.session_state['current_page'] = 1
-        st.session_state['last_filter_records'] = total_records
-        if 'bulk_set_approve_checkbox' in st.session_state:
-             st.session_state['bulk_set_approve_checkbox'] = False
-
-    # ページネーションロジック
     start_index = (st.session_state['current_page'] - 1) * RECORDS_PER_PAGE
     end_index = min(start_index + RECORDS_PER_PAGE, total_records)
     
     df_page = df_active_review.iloc[start_index:end_index].copy()
+    current_page_ids = df_page['id'].tolist()
 
     # --- ページヘッダーとナビゲーション ---
     st.header(f"📚 レビュー対象: {total_records} 件 (残り)")
@@ -295,7 +283,6 @@ def master_approval_app_v4():
         st.markdown(f"**現在のページ:** {st.session_state['current_page']} / {total_pages} (表示件数: {len(df_page)} 件)")
     
     with col_page_nav:
-        
         col_prev, col_next = st.columns(2)
         with col_prev:
             if st.session_state['current_page'] > 1:
@@ -309,83 +296,84 @@ def master_approval_app_v4():
     # ---------------------------
     # 【メインコンテンツ: 表形式レビューフォーム】
     # ---------------------------
+    
+    # 一括承認チェックボックス
+    col_bulk, col_bulk_info = st.columns([2, 5])
+    with col_bulk:
+        bulk_approve_checked = st.checkbox(
+            "🚀 このページの**「レビュー待ち」**レコードを、**一括で承認**する",
+            value=False,
+            key='bulk_approve_checkbox_ui',
+            help="このチェックボックスをオンにしてフォームを送信すると、個別に選択されていないレコードは全て「承認」として処理されます。",
+        )
+    with col_bulk_info:
+         st.caption("⚠️ 個別のアクション選択が優先されます")
+    
+    # 提案 2: 一括承認の挙動を視覚的にフィードバック
+    if bulk_approve_checked:
+        pending_count = sum(1 for rid in current_page_ids 
+                            if st.session_state.get(f'action_{rid}') == 'レビュー待ち')
+        st.info(f"ℹ️ 現在のページで一括承認対象となる「レビュー待ち」レコードは **{pending_count}件** です。")
 
-    # Streamlit Form を使用して、ページ単位で一括送信を可能にする
+
+    # フォームの前に action_ の初期値を一括設定
+    for record_id in current_page_ids:
+        action_key = f'action_{record_id}'
+        if action_key not in st.session_state:
+            st.session_state[action_key] = 'レビュー待ち'
+
+    # Streamlit Form
     with st.form(key=f'review_form_{st.session_state["current_page"]}'):
         
-        # --- ヘッダー行の表示 ---
-        header_cols = st.columns([0.5, 2, 1.5, 2, 2])
+        # ヘッダー行
+        header_cols = st.columns([0.5, 2.5, 1.5, 3])
         header_cols[0].markdown("**ID**")
         header_cols[1].markdown("**変更サマリ**")
-        header_cols[2].markdown("**差分詳細**")
-        header_cols[3].markdown("##### **✅ アクション**")
-        header_cols[4].markdown("##### **📝 コメント**")
+        header_cols[2].markdown("##### **✅ アクション**")
+        header_cols[3].markdown("##### **📝 コメント**")
         st.markdown("---")
         
-        # 各レコードを縦に表示（各行はst.columnsで構成される）
         for index, row in df_page.iterrows():
             record_id = row['id']
+            action_key = f'action_{record_id}'
+            comment_key = f'comment_{record_id}'
             
-            # デフォルトインデックスの決定
-            current_label = st.session_state.get(f'action_{record_id}')
-            default_index = OPTIONS_JP.index(current_label) if current_label in OPTIONS_JP else OPTIONS_JP.index('レビュー待ち')
+            current_label = st.session_state[action_key]
+            default_index = OPTIONS_JP.index(current_label) 
 
-            # --- レコード行の表示 ---
-            row_cols = st.columns([0.5, 2, 1.5, 2, 2])
+            # レコード行
+            row_cols = st.columns([0.5, 2.5, 1.5, 3])
             
-            # 1. ID
             with row_cols[0]:
                 st.markdown(f"**{record_id}**")
                 
-            # 2. 変更サマリ
             with row_cols[1]:
                 summary_text = create_vertical_summary(row)
                 st.info(summary_text)
-
-            # 3. 差分詳細 (ボタンとExpander)
+            
             with row_cols[2]:
-                with st.expander("🔍 詳細を確認"):
-                    # 修正された関数を呼び出し、ハイライトされたDataFrameを表示
-                    st.dataframe(
-                        create_vertical_diff(row),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-
-            # 4. アクション（OK/NG ラジオボタン）
-            with row_cols[3]:
                 st.radio(
                     "アクション",
                     options=OPTIONS_JP,
                     index=default_index, 
                     format_func=lambda x: f"✅ {x}" if x=='承認' else (f"❌ {x}" if x=='差し戻し' else x),
-                    key=f'action_{record_id}',
+                    key=action_key,
                     horizontal=True,
-                    label_visibility="collapsed" # ヘッダーがあるため非表示
+                    label_visibility="collapsed"
                 )
             
-            # 5. コメント欄
-            with row_cols[4]:
+            with row_cols[3]:
                 st.text_area(
                     "コメント",
-                    value=st.session_state.get(f'comment_{record_id}', ""),
-                    key=f'comment_{record_id}',
+                    value=st.session_state.get(comment_key, ""),
+                    key=comment_key,
                     height=70,
-                    label_visibility="collapsed" # ヘッダーがあるため非表示
+                    label_visibility="collapsed" 
                 )
             
-            st.divider() # レコード間の区切り線
+            st.divider()
 
-        # フォーム下部の一括チェックと送信ボタン
-        
-        st.markdown("---")
-        st.checkbox(
-            "このページの**「レビュー待ち」**レコードを、**一括で承認**する",
-            value=st.session_state.get('bulk_set_approve_checkbox', False),
-            key='bulk_set_approve_checkbox',
-            help="このチェックボックスをオンにしてフォームを送信すると、個別に選択されていないレコードは全て「承認」として処理されます。",
-        )
-        
+        # 送信ボタン
         submitted = st.form_submit_button(
             f"🎉 選択した {len(df_page)} 件を一括申請・実行", 
             type="primary",
@@ -393,13 +381,42 @@ def master_approval_app_v4():
         )
 
         if submitted:
-            # チェックボックスの状態をフォーム送信時に取得
-            bulk_checked = st.session_state.get('bulk_set_approve_checkbox', False)
+            processing_success = execute_page_action(df_page, bulk_approve_checked)
+
+            # ページ遷移ロジック
+            if processing_success:
+                if st.session_state['current_page'] < total_pages:
+                    st.session_state['current_page'] += 1
+                else:
+                    # 提案 4: 最後のページで処理完了後もページを維持
+                    st.success("🎉 全てのページのレビューが完了しました！")
             
-            # 処理を実行
-            execute_page_action(df_page, bulk_checked, st.session_state['current_page'], total_pages)
+            # フォーム送信で自動的にrerunされる
+
+    # フォームの後に詳細表示セクションを配置
+    st.markdown("---")
+    st.subheader("🔍 詳細差分ビュー")
+    
+    col_detail_select, col_detail_placeholder = st.columns([2, 5])
+    
+    with col_detail_select:
+        selected_detail_id = st.selectbox(
+            "詳細を表示するレコードを選択", 
+            options=[None] + current_page_ids, 
+            format_func=lambda x: f"ID: {x}" if x else "レコードIDを選択してください",
+            key='selected_detail_id'
+        )
+    
+    if selected_detail_id:
+        # 提案 1: df_pageから取得することで効率化
+        detail_row = df_page[df_page['id'] == selected_detail_id].iloc[0]
+        st.dataframe(
+            create_vertical_diff(detail_row),
+            use_container_width=True,
+            hide_index=True
+        )
 
 
 # === アプリケーション実行 ===
 if __name__ == "__main__":
-    master_approval_app_v4()
+    master_approval_app_v6()
